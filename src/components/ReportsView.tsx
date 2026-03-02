@@ -260,7 +260,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ appointments, services
             </div>
           </div>
           <p className="text-fog text-xs font-semibold uppercase tracking-widest mb-1">Período</p>
-          <h4 className="text-3xl font-sans font-bold text-plum capitalize">{period === 'all' ? 'Histórico' : period}</h4>
+          <h4 className="text-3xl font-sans font-bold text-plum capitalize">{({ week: 'Semana', month: 'Mês', year: 'Ano', all: 'Histórico' } as const)[period]}</h4>
           <p className="text-xs text-dusk font-medium mt-2">Filtro ativo</p>
         </div>
       </div>
