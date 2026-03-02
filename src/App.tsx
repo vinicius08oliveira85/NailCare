@@ -93,7 +93,7 @@ function whatsAppMessage(clientName: string, lastServiceDays: number | null): st
   if (lastServiceDays === null) {
     return `Olá, ${name}! Tudo bem? Sou a Juliana. 🌸
 
-Passando para te convidar a conhecer nosso espaço e dar aquele up no visual das suas unhas. Temos cores incríveis e técnicas modernas te esperando!
+Passando para te convidar a conhecer nosso espaço e dar aquele up no visual das suas unhas.
 
 Gostaria de consultar nossos horários disponíveis para esta semana? Será um prazer te atender!`;
   }
