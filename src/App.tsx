@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Calendar, 
   Users, 
-  Scissors, 
+  Sparkles, 
   LayoutDashboard, 
   Plus, 
   CheckCircle2, 
@@ -16,16 +16,20 @@ import {
   Phone,
   DollarSign,
   ChevronRight,
+  ChevronLeft,
   Trash2,
   Edit2,
   Menu,
   X,
   BarChart3
 } from 'lucide-react';
+import { format, addMonths, subMonths, startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval, isSameMonth, isSameDay, isToday } from 'date-fns';
+import { ptBR } from 'date-fns/locale';
 import { motion, AnimatePresence } from 'motion/react';
 import { Client, Service, Appointment, PaymentStatus } from './types.ts';
 import { CalendarView } from './components/CalendarView';
 import { ReportsView } from './components/ReportsView';
+import { supabase } from './lib/supabase.ts';
 
 // Helper to format currency
 const formatCurrency = (value: number) => {
@@ -35,56 +39,151 @@ const formatCurrency = (value: number) => {
   }).format(value);
 };
 
-// Fallback for randomUUID
-const generateId = () => {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return Math.random().toString(36).substring(2, 15);
+// Data: YYYY-MM-DD <-> DD/MM/AAAA
+const formatYMDToDDMMAAAA = (ymd: string): string => {
+  if (!ymd || ymd.length < 10) return '';
+  const [y, m, d] = ymd.split('-');
+  return `${d}/${m}/${y}`;
+};
+const parseDDMMAAAAToYMD = (s: string): string => {
+  const digits = s.replace(/\D/g, '');
+  if (digits.length !== 8) return '';
+  const d = digits.slice(0, 2);
+  const m = digits.slice(2, 4);
+  const y = digits.slice(4, 8);
+  const day = parseInt(d, 10);
+  const month = parseInt(m, 10);
+  const year = parseInt(y, 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900 || year > 2100) return '';
+  return `${y}-${m}-${d}`;
+};
+const maskDateDDMMAAAA = (raw: string): string => {
+  const d = raw.replace(/\D/g, '');
+  if (d.length <= 2) return d;
+  if (d.length <= 4) return `${d.slice(0, 2)}/${d.slice(2)}`;
+  return `${d.slice(0, 2)}/${d.slice(2, 4)}/${d.slice(4, 8)}`;
 };
 
+// Mapear linha Supabase (snake_case) para tipo do app (camelCase)
+function mapClient(row: { id: string; name: string; phone: string }): Client {
+  return { id: row.id, name: row.name, phone: row.phone };
+}
+function mapService(row: { id: string; name: string; price: number }): Service {
+  return { id: row.id, name: row.name, price: Number(row.price) };
+}
+function mapAppointment(row: { id: string; client_id: string | null; client_name: string | null; service_id: string; date: string; status: string }): Appointment {
+  return {
+    id: row.id,
+    clientId: row.client_id ?? undefined,
+    clientName: row.client_name ?? undefined,
+    serviceId: row.service_id,
+    date: row.date,
+    status: row.status as PaymentStatus
+  };
+}
+
 export default function App() {
-  // State
-  const [clients, setClients] = useState<Client[]>(() => {
-    const saved = localStorage.getItem('nailcare_clients');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [services, setServices] = useState<Service[]>(() => {
-    const saved = localStorage.getItem('nailcare_services');
-    return saved ? JSON.parse(saved) : [
-      { id: '1', name: 'Manicure', price: 35 },
-      { id: '2', name: 'Pedicure', price: 40 },
-      { id: '3', name: 'Combo (Mão e Pé)', price: 70 }
-    ];
-  });
-  const [appointments, setAppointments] = useState<Appointment[]>(() => {
-    const saved = localStorage.getItem('nailcare_appointments');
-    return saved ? JSON.parse(saved) : [];
-  });
+  // State (inicial vazio; carregado do Supabase no useEffect)
+  const [clients, setClients] = useState<Client[]>([]);
+  const [services, setServices] = useState<Service[]>([]);
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [dataLoading, setDataLoading] = useState(true);
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'agenda' | 'clients' | 'services' | 'reports'>('dashboard');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalType, setModalType] = useState<'appointment' | 'client' | 'service'>('appointment');
   const [modalStatus, setModalStatus] = useState<PaymentStatus>(PaymentStatus.PENDING);
   const [modalDate, setModalDate] = useState<string>(''); // YYYY-MM-DD
+  const [modalDateDisplay, setModalDateDisplay] = useState<string>(''); // DD/MM/AAAA no input
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+  const [calendarViewMonth, setCalendarViewMonth] = useState(() => new Date());
+  const datePickerRef = useRef<HTMLDivElement>(null);
   const [modalTime, setModalTime] = useState<string>(''); // HH:mm
   const [clientMode, setClientMode] = useState<'existing' | 'new' | 'quick'>('existing');
   const [historyClientId, setHistoryClientId] = useState<string | null>(null);
   const [historyServiceId, setHistoryServiceId] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<Client | Service | Appointment | null>(null);
 
-  // Persistence
+  // Carregamento inicial do Supabase
   useEffect(() => {
-    localStorage.setItem('nailcare_clients', JSON.stringify(clients));
-  }, [clients]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const [clientsRes, servicesRes, appointmentsRes] = await Promise.all([
+          supabase.from('clients').select('*').order('created_at', { ascending: true }),
+          supabase.from('services').select('*').order('created_at', { ascending: true }),
+          supabase.from('appointments').select('*').order('created_at', { ascending: true })
+        ]);
+        if (cancelled) return;
+        const err = clientsRes.error || servicesRes.error || appointmentsRes.error;
+        if (err) {
+          console.error('NailCare Supabase load error:', err);
+          setDataLoading(false);
+          return;
+        }
+        setClients((clientsRes.data ?? []).map(mapClient));
+        let servicesData = (servicesRes.data ?? []).map(mapService);
+        if (servicesData.length === 0) {
+          const { data: inserted } = await supabase.from('services').insert([
+            { name: 'Manicure', price: 35 },
+            { name: 'Pedicure', price: 40 },
+            { name: 'Combo (Mão e Pé)', price: 70 }
+          ]).select();
+          if (!cancelled && inserted?.length) servicesData = inserted.map(mapService);
+        }
+        setServices(servicesData);
+        setAppointments((appointmentsRes.data ?? []).map(mapAppointment));
+      } catch (e) {
+        if (!cancelled) console.error('NailCare Supabase load error:', e);
+      } finally {
+        if (!cancelled) setDataLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
+  // Fechar date picker ao clicar fora
   useEffect(() => {
-    localStorage.setItem('nailcare_services', JSON.stringify(services));
-  }, [services]);
+    if (!isDatePickerOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (datePickerRef.current && !datePickerRef.current.contains(e.target as Node)) {
+        setIsDatePickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [isDatePickerOpen]);
 
+  // Realtime: sincronizar mudanças de outros dispositivos (evitar duplicar: INSERT só adiciona se o id ainda não existir)
   useEffect(() => {
-    localStorage.setItem('nailcare_appointments', JSON.stringify(appointments));
-  }, [appointments]);
+    const channel = supabase
+      .channel('nailcare-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clients' }, (payload) => {
+        const row = payload.new as any;
+        const oldRow = payload.old as any;
+        if (payload.eventType === 'INSERT' && row) setClients(prev => prev.some(c => c.id === row.id) ? prev : [...prev, mapClient(row)]);
+        if (payload.eventType === 'UPDATE' && row) setClients(prev => prev.map(c => c.id === row.id ? mapClient(row) : c));
+        if (payload.eventType === 'DELETE' && oldRow) setClients(prev => prev.filter(c => c.id !== oldRow.id));
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'services' }, (payload) => {
+        const row = payload.new as any;
+        const oldRow = payload.old as any;
+        if (payload.eventType === 'INSERT' && row) setServices(prev => prev.some(s => s.id === row.id) ? prev : [...prev, mapService(row)]);
+        if (payload.eventType === 'UPDATE' && row) setServices(prev => prev.map(s => s.id === row.id ? mapService(row) : s));
+        if (payload.eventType === 'DELETE' && oldRow) setServices(prev => prev.filter(s => s.id !== oldRow.id));
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, (payload) => {
+        const row = payload.new as any;
+        const oldRow = payload.old as any;
+        if (payload.eventType === 'INSERT' && row) setAppointments(prev => prev.some(a => a.id === row.id) ? prev : [...prev, mapAppointment(row)]);
+        if (payload.eventType === 'UPDATE' && row) setAppointments(prev => prev.map(a => a.id === row.id ? mapAppointment(row) : a));
+        if (payload.eventType === 'DELETE' && oldRow) setAppointments(prev => prev.filter(a => a.id !== oldRow.id));
+      })
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
 
   // Calculations
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -129,7 +228,9 @@ export default function App() {
       setModalStatus(item?.status || PaymentStatus.PENDING);
       setClientMode(item?.clientId ? 'existing' : (item?.clientName ? 'quick' : 'existing'));
       const date = item?.date ? new Date(item.date) : new Date();
-      setModalDate(date.toISOString().split('T')[0]);
+      const ymd = date.toISOString().split('T')[0];
+      setModalDate(ymd);
+      setModalDateDisplay(formatYMDToDDMMAAAA(ymd));
       const hours = date.getHours().toString().padStart(2, '0');
       const minutes = date.getMinutes().toString().padStart(2, '0');
       setModalTime(`${hours}:${minutes}`);
@@ -137,73 +238,121 @@ export default function App() {
     setIsModalOpen(true);
   };
 
-  const addClient = (name: string, phone: string) => {
-    if (editingItem && 'phone' in editingItem) {
-      setClients(clients.map(c => c.id === editingItem.id ? { ...c, name, phone } : c));
-    } else {
-      const newClient: Client = { id: generateId(), name, phone };
-      setClients([...clients, newClient]);
+  const addClient = async (name: string, phone: string) => {
+    try {
+      if (editingItem && 'phone' in editingItem) {
+        const { data, error } = await supabase.from('clients').update({ name, phone }).eq('id', editingItem.id).select().single();
+        if (error) throw error;
+        if (data) setClients(clients.map(c => c.id === editingItem.id ? mapClient(data) : c));
+      } else {
+        const { data, error } = await supabase.from('clients').insert({ name, phone }).select().single();
+        if (error) throw error;
+        if (data) setClients(prev => [...prev, mapClient(data)]);
+      }
+      setIsModalOpen(false);
+      setEditingItem(null);
+    } catch (e) {
+      console.error('NailCare addClient error:', e);
     }
-    setIsModalOpen(false);
-    setEditingItem(null);
   };
 
-  const addService = (name: string, price: number) => {
-    if (editingItem && 'price' in editingItem) {
-      setServices(services.map(s => s.id === editingItem.id ? { ...s, name, price } : s));
-    } else {
-      const newService: Service = { id: generateId(), name, price };
-      setServices([...services, newService]);
+  const addService = async (name: string, price: number) => {
+    try {
+      if (editingItem && 'price' in editingItem) {
+        const { data, error } = await supabase.from('services').update({ name, price }).eq('id', editingItem.id).select().single();
+        if (error) throw error;
+        if (data) setServices(services.map(s => s.id === editingItem.id ? mapService(data) : s));
+      } else {
+        const { data, error } = await supabase.from('services').insert({ name, price }).select().single();
+        if (error) throw error;
+        if (data) setServices(prev => [...prev, mapService(data)]);
+      }
+      setIsModalOpen(false);
+      setEditingItem(null);
+    } catch (e) {
+      console.error('NailCare addService error:', e);
     }
-    setIsModalOpen(false);
-    setEditingItem(null);
   };
 
-  const addAppointment = (clientId: string | undefined, clientName: string | undefined, serviceId: string, status: PaymentStatus) => {
-    // Combine date and time
+  const addAppointment = async (clientId: string | undefined, clientName: string | undefined, serviceId: string, status: PaymentStatus) => {
     const combinedDate = new Date(`${modalDate}T${modalTime}`);
     const finalDate = combinedDate.toISOString();
-
-    if (editingItem && 'status' in editingItem) {
-      setAppointments(appointments.map(a => a.id === editingItem.id ? { ...a, clientId, clientName, serviceId, date: finalDate, status } : a));
-    } else {
-      const newApp: Appointment = {
-        id: generateId(),
-        clientId,
-        clientName,
-        serviceId,
-        date: finalDate,
-        status
-      };
-      setAppointments([...appointments, newApp]);
+    try {
+      if (editingItem && 'status' in editingItem) {
+        const { data, error } = await supabase.from('appointments').update({
+          client_id: clientId ?? null,
+          client_name: clientName ?? null,
+          service_id: serviceId,
+          date: finalDate,
+          status
+        }).eq('id', editingItem.id).select().single();
+        if (error) throw error;
+        if (data) setAppointments(appointments.map(a => a.id === editingItem.id ? mapAppointment(data) : a));
+      } else {
+        const { data, error } = await supabase.from('appointments').insert({
+          client_id: clientId ?? null,
+          client_name: clientName ?? null,
+          service_id: serviceId,
+          date: finalDate,
+          status
+        }).select().single();
+        if (error) throw error;
+        if (data) setAppointments(prev => [...prev, mapAppointment(data)]);
+      }
+      setIsModalOpen(false);
+      setEditingItem(null);
+    } catch (e) {
+      console.error('NailCare addAppointment error:', e);
     }
-    setIsModalOpen(false);
-    setEditingItem(null);
   };
 
-  const updateAppointmentStatus = (id: string, status: PaymentStatus) => {
-    setAppointments(appointments.map(a => a.id === id ? { ...a, status } : a));
+  const updateAppointmentStatus = async (id: string, status: PaymentStatus) => {
+    try {
+      const { error } = await supabase.from('appointments').update({ status }).eq('id', id);
+      if (error) throw error;
+      setAppointments(prev => prev.map(a => a.id === id ? { ...a, status } : a));
+    } catch (e) {
+      console.error('NailCare updateAppointmentStatus error:', e);
+    }
   };
 
-  const deleteItem = (type: 'client' | 'service' | 'appointment', id: string) => {
-    if (type === 'client') setClients(clients.filter(c => c.id !== id));
-    if (type === 'service') setServices(services.filter(s => s.id !== id));
-    if (type === 'appointment') setAppointments(appointments.filter(a => a.id !== id));
+  const deleteItem = async (type: 'client' | 'service' | 'appointment', id: string) => {
+    try {
+      if (type === 'client') {
+        const { error } = await supabase.from('clients').delete().eq('id', id);
+        if (error) throw error;
+        setClients(prev => prev.filter(c => c.id !== id));
+      } else if (type === 'service') {
+        const { error } = await supabase.from('services').delete().eq('id', id);
+        if (error) throw error;
+        setServices(prev => prev.filter(s => s.id !== id));
+      } else {
+        const { error } = await supabase.from('appointments').delete().eq('id', id);
+        if (error) throw error;
+        setAppointments(prev => prev.filter(a => a.id !== id));
+      }
+    } catch (e) {
+      console.error('NailCare deleteItem error:', e);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-brand-bg/20 flex flex-col md:flex-row">
+    <div className="min-h-screen bg-brand-bg flex flex-col md:flex-row">
       {/* Mobile Header */}
-      <div className="md:hidden bg-white border-b border-stone-100 p-4 flex justify-between items-center sticky top-0 z-50">
-        <div className="flex items-center gap-3">
+      <div className="md:hidden bg-white border-b border-iris-light/30 px-4 h-16 min-h-16 flex justify-between items-center sticky top-0 z-50 shrink-0">
+        <button
+          type="button"
+          onClick={() => { setActiveTab('dashboard'); setIsMenuOpen(false); }}
+          className="flex items-center gap-3 focus:outline-none focus:ring-2 focus:ring-brand-primary focus:ring-offset-2 rounded-xl"
+        >
           <div className="w-10 h-10 bg-brand-primary/10 rounded-xl flex items-center justify-center text-brand-primary shadow-sm">
-            <Scissors size={20} />
+            <Sparkles size={20} />
           </div>
-          <h1 className="text-xl font-bold tracking-tight text-brand-accent">NailCare</h1>
-        </div>
+          <h1 className="text-xl font-sans font-bold tracking-tight text-plum">NailCare</h1>
+        </button>
         <button 
           onClick={() => setIsMenuOpen(!isMenuOpen)}
-          className="p-2 text-stone-500 hover:bg-brand-bg rounded-xl transition-colors"
+          className="p-2 text-dusk hover:bg-mist rounded-md transition-colors duration-150"
         >
           {isMenuOpen ? <X size={24} /> : <Menu size={24} />}
         </button>
@@ -216,126 +365,137 @@ export default function App() {
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="md:hidden fixed inset-0 top-[73px] z-40 bg-white/80 backdrop-blur-md p-6"
+            className="md:hidden fixed left-0 right-0 bottom-0 top-16 z-40 bg-white/95 backdrop-blur-md flex flex-col overflow-hidden"
+            style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
           >
-            <div className="bg-white rounded-[32px] shadow-2xl shadow-brand-primary/10 border border-stone-100 p-6 space-y-2">
+            <div className="flex-1 overflow-y-auto p-4">
+            <div className="bg-white rounded-xl shadow-2xl shadow-brand-primary/10 border border-iris-light/30 p-6 space-y-2">
               <button 
                 onClick={() => { setActiveTab('dashboard'); setIsMenuOpen(false); }}
-                className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all duration-300 ${activeTab === 'dashboard' ? 'bg-brand-primary text-white shadow-xl shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg'}`}
+                className={`w-full flex items-center gap-4 px-6 py-5 rounded-md transition-colors duration-150 ${activeTab === 'dashboard' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-dusk hover:bg-mist'}`}
               >
                 <LayoutDashboard size={22} />
-                <span className="font-bold text-lg">Início</span>
+                <span className="font-semibold text-lg">Início</span>
               </button>
               <button 
                 onClick={() => { setActiveTab('agenda'); setIsMenuOpen(false); }}
-                className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all duration-300 ${activeTab === 'agenda' ? 'bg-brand-primary text-white shadow-xl shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg'}`}
+                className={`w-full flex items-center gap-4 px-6 py-5 rounded-md transition-colors duration-150 ${activeTab === 'agenda' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-dusk hover:bg-mist'}`}
               >
                 <Calendar size={22} />
-                <span className="font-bold text-lg">Agenda</span>
+                <span className="font-semibold text-lg">Agenda</span>
               </button>
               <button 
                 onClick={() => { setActiveTab('clients'); setIsMenuOpen(false); }}
-                className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all duration-300 ${activeTab === 'clients' ? 'bg-brand-primary text-white shadow-xl shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg'}`}
+                className={`w-full flex items-center gap-4 px-6 py-5 rounded-md transition-colors duration-150 ${activeTab === 'clients' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-dusk hover:bg-mist'}`}
               >
                 <Users size={22} />
-                <span className="font-bold text-lg">Clientes</span>
+                <span className="font-semibold text-lg">Clientes</span>
               </button>
               <button 
                 onClick={() => { setActiveTab('services'); setIsMenuOpen(false); }}
-                className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all duration-300 ${activeTab === 'services' ? 'bg-brand-primary text-white shadow-xl shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg'}`}
+                className={`w-full flex items-center gap-4 px-6 py-5 rounded-md transition-colors duration-150 ${activeTab === 'services' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-dusk hover:bg-mist'}`}
               >
-                <Scissors size={22} />
-                <span className="font-bold text-lg">Serviços</span>
+                <Sparkles size={22} />
+                <span className="font-semibold text-lg">Serviços</span>
               </button>
               <button 
                 onClick={() => { setActiveTab('reports'); setIsMenuOpen(false); }}
-                className={`w-full flex items-center gap-4 px-6 py-5 rounded-2xl transition-all duration-300 ${activeTab === 'reports' ? 'bg-brand-primary text-white shadow-xl shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg'}`}
+                className={`w-full flex items-center gap-4 px-6 py-5 rounded-md transition-colors duration-150 ${activeTab === 'reports' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-dusk hover:bg-mist'}`}
               >
                 <BarChart3 size={22} />
-                <span className="font-bold text-lg">Relatórios</span>
+                <span className="font-semibold text-lg">Relatórios</span>
               </button>
+            </div>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
       {/* Sidebar (Desktop) */}
-      <nav className="hidden md:flex w-72 bg-white border-r border-stone-100 p-8 flex-col gap-10 sticky top-0 h-screen">
+      <nav className="hidden md:flex w-72 bg-white/90 backdrop-blur-sm border-r border-iris-light/30 p-6 flex-col gap-8 sticky top-0 h-screen shadow-[2px_0_16px_0_rgb(157_139_181/0.08)]">
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 bg-brand-primary/10 rounded-2xl flex items-center justify-center text-brand-primary shadow-sm">
-            <Scissors size={24} />
-          </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab('dashboard')}
+            className="w-12 h-12 bg-brand-primary/10 rounded-xl flex items-center justify-center text-brand-primary shadow-sm hover:bg-brand-primary/20 transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-brand-primary focus:ring-offset-2"
+            title="Ir para o início"
+          >
+            <Sparkles size={24} />
+          </button>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight text-brand-accent">NailCare</h1>
-            <p className="text-[10px] uppercase tracking-[0.2em] text-stone-400 font-bold">Manager</p>
+            <h1 className="text-2xl font-sans font-bold tracking-tight text-plum">NailCare</h1>
+            <p className="text-xs uppercase tracking-widest text-fog font-semibold mt-0.5">Manager</p>
           </div>
         </div>
 
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1">
           <button 
             onClick={() => setActiveTab('dashboard')}
-            className={`flex items-center gap-3 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'dashboard' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg hover:text-brand-primary'}`}
+            className={`relative flex items-center gap-3 px-4 py-3 rounded-md transition-colors duration-150 ${activeTab === 'dashboard' ? 'bg-iris-light/30 text-iris-dark font-semibold before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:w-0.5 before:h-5 before:rounded-full before:bg-brand-primary' : 'text-dusk hover:bg-mist hover:text-plum font-medium'}`}
           >
             <LayoutDashboard size={20} />
-            <span className="font-semibold">Início</span>
+            <span>Início</span>
           </button>
           <button 
             onClick={() => setActiveTab('agenda')}
-            className={`flex items-center gap-3 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'agenda' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg hover:text-brand-primary'}`}
+            className={`relative flex items-center gap-3 px-4 py-3 rounded-md transition-colors duration-150 ${activeTab === 'agenda' ? 'bg-iris-light/30 text-iris-dark font-semibold before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:w-0.5 before:h-5 before:rounded-full before:bg-brand-primary' : 'text-dusk hover:bg-mist hover:text-plum font-medium'}`}
           >
             <Calendar size={20} />
-            <span className="font-semibold">Agenda</span>
+            <span>Agenda</span>
           </button>
           <button 
             onClick={() => setActiveTab('clients')}
-            className={`flex items-center gap-3 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'clients' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg hover:text-brand-primary'}`}
+            className={`relative flex items-center gap-3 px-4 py-3 rounded-md transition-colors duration-150 ${activeTab === 'clients' ? 'bg-iris-light/30 text-iris-dark font-semibold before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:w-0.5 before:h-5 before:rounded-full before:bg-brand-primary' : 'text-dusk hover:bg-mist hover:text-plum font-medium'}`}
           >
             <Users size={20} />
-            <span className="font-semibold">Clientes</span>
+            <span>Clientes</span>
           </button>
           <button 
             onClick={() => setActiveTab('services')}
-            className={`flex items-center gap-3 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'services' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg hover:text-brand-primary'}`}
+            className={`relative flex items-center gap-3 px-4 py-3 rounded-md transition-colors duration-150 ${activeTab === 'services' ? 'bg-iris-light/30 text-iris-dark font-semibold before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:w-0.5 before:h-5 before:rounded-full before:bg-brand-primary' : 'text-dusk hover:bg-mist hover:text-plum font-medium'}`}
           >
-            <Scissors size={20} />
-            <span className="font-semibold">Serviços</span>
+            <Sparkles size={20} />
+            <span>Serviços</span>
           </button>
           <button 
             onClick={() => setActiveTab('reports')}
-            className={`flex items-center gap-3 px-5 py-4 rounded-2xl transition-all duration-300 ${activeTab === 'reports' ? 'bg-brand-primary text-white shadow-lg shadow-brand-primary/30' : 'text-stone-500 hover:bg-brand-bg hover:text-brand-primary'}`}
+            className={`relative flex items-center gap-3 px-4 py-3 rounded-md transition-colors duration-150 ${activeTab === 'reports' ? 'bg-iris-light/30 text-iris-dark font-semibold before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:w-0.5 before:h-5 before:rounded-full before:bg-brand-primary' : 'text-dusk hover:bg-mist hover:text-plum font-medium'}`}
           >
             <BarChart3 size={20} />
-            <span className="font-semibold">Relatórios</span>
+            <span>Relatórios</span>
           </button>
         </div>
 
-        <div className="mt-auto pt-8 border-t border-stone-50">
-          <p className="text-[10px] text-stone-400 uppercase tracking-widest font-bold mb-4">Próximo Horário</p>
+        <div className="mt-auto pt-6 border-t border-iris-light/30">
+          <p className="text-xs text-fog uppercase tracking-widest font-semibold mb-3">Próximo Horário</p>
           {stats.nextAppointment ? (
             <div 
               onClick={() => handleOpenModal('appointment', stats.nextAppointment)}
-              className="p-4 bg-brand-bg rounded-2xl border border-brand-secondary/10 cursor-pointer hover:border-brand-primary/30 transition-all group"
+              className="p-4 bg-mist rounded-lg border border-iris-light/30 cursor-pointer hover:border-brand-primary/30 transition-all duration-150 group"
             >
               <div className="flex justify-between items-start">
                 <div>
-                  <p className="font-bold text-sm text-brand-accent">
+                  <p className="font-semibold text-sm text-plum">
                     {stats.nextAppointment?.clientName || clients.find(c => c.id === stats.nextAppointment?.clientId)?.name || 'Excluído'}
                   </p>
-                  <p className="text-[11px] text-stone-500 mt-1 font-medium">
-                    {new Date(stats.nextAppointment.date).toLocaleDateString('pt-BR')} • {new Date(stats.nextAppointment.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                  <p className="text-xs text-dusk mt-1 font-medium">
+                    {new Date(stats.nextAppointment.date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })} • {new Date(stats.nextAppointment.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', hour12: false })}
                   </p>
                 </div>
-                <Edit2 size={12} className="text-stone-300 group-hover:text-brand-primary transition-colors" />
+                <Edit2 size={12} className="text-fog group-hover:text-brand-primary transition-colors" />
               </div>
             </div>
           ) : (
-            <p className="text-sm text-stone-400 italic">Nenhum agendado</p>
+            <p className="text-sm text-fog italic">Nenhum agendado</p>
           )}
         </div>
       </nav>
 
       {/* Main Content */}
       <main className="flex-1 p-6 md:p-10 max-w-6xl mx-auto w-full">
+        {dataLoading ? (
+          <div className="flex items-center justify-center min-h-[40vh] text-dusk font-sans">Carregando...</div>
+        ) : (
         <AnimatePresence mode="wait">
           {activeTab === 'dashboard' && (
             <motion.div 
@@ -346,45 +506,45 @@ export default function App() {
               className="space-y-10"
             >
               <header>
-                <h2 className="text-5xl font-medium text-brand-accent">Olá, bem-vinda</h2>
-                <p className="text-stone-400 mt-3 text-lg font-serif italic">Seu dia está florescendo. Veja o resumo de hoje.</p>
+                <h2 className="text-5xl font-sans font-medium text-plum">Olá, bem-vinda</h2>
+                <p className="text-dusk mt-3 text-lg font-sans italic">Seu dia está florescendo. Veja o resumo de hoje.</p>
               </header>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <div className="glass-card p-8 flex flex-col gap-3 group hover:shadow-xl hover:shadow-brand-primary/5 transition-all duration-500">
-                  <div className="w-10 h-10 bg-emerald-50 text-emerald-500 rounded-xl flex items-center justify-center">
-                    <DollarSign size={20} />
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                <div className="glass-card p-5 flex flex-col gap-2 group hover:shadow-[var(--shadow-raised)] hover:-translate-y-0.5 transition-all duration-200" style={{ boxShadow: 'var(--shadow-card)' }}>
+                  <div className="w-9 h-9 bg-emerald-50 text-emerald-500 rounded-lg flex items-center justify-center">
+                    <DollarSign size={18} />
                   </div>
-                  <span className="text-[10px] uppercase tracking-[0.2em] text-stone-400 font-bold">Lucro do Dia</span>
-                  <span className="text-4xl font-light tracking-tight text-stone-800">{formatCurrency(stats.today)}</span>
+                  <span className="text-[10px] uppercase tracking-widest text-fog font-semibold">Lucro do Dia</span>
+                  <span className="text-2xl font-sans font-light tracking-tight text-plum tabular-nums">{formatCurrency(stats.today)}</span>
                 </div>
-                <div className="glass-card p-8 flex flex-col gap-3 group hover:shadow-xl hover:shadow-brand-primary/5 transition-all duration-500">
-                  <div className="w-10 h-10 bg-brand-primary/10 text-brand-primary rounded-xl flex items-center justify-center">
-                    <Calendar size={20} />
+                <div className="glass-card p-5 flex flex-col gap-2 group hover:shadow-[var(--shadow-raised)] hover:-translate-y-0.5 transition-all duration-200" style={{ boxShadow: 'var(--shadow-card)' }}>
+                  <div className="w-9 h-9 bg-brand-primary/10 text-brand-primary rounded-lg flex items-center justify-center">
+                    <Calendar size={18} />
                   </div>
-                  <span className="text-[10px] uppercase tracking-[0.2em] text-stone-400 font-bold">Lucro da Semana</span>
-                  <span className="text-4xl font-light tracking-tight text-stone-800">{formatCurrency(stats.week)}</span>
+                  <span className="text-[10px] uppercase tracking-widest text-fog font-semibold">Lucro da Semana</span>
+                  <span className="text-2xl font-sans font-light tracking-tight text-plum tabular-nums">{formatCurrency(stats.week)}</span>
                 </div>
-                <div className="glass-card p-8 flex flex-col gap-3 group hover:shadow-xl hover:shadow-brand-primary/5 transition-all duration-500">
-                  <div className="w-10 h-10 bg-brand-accent/10 text-brand-accent rounded-xl flex items-center justify-center">
-                    <LayoutDashboard size={20} />
+                <div className="glass-card p-5 flex flex-col gap-2 group hover:shadow-[var(--shadow-raised)] hover:-translate-y-0.5 transition-all duration-200" style={{ boxShadow: 'var(--shadow-card)' }}>
+                  <div className="w-9 h-9 bg-brand-accent/10 text-brand-accent rounded-lg flex items-center justify-center">
+                    <LayoutDashboard size={18} />
                   </div>
-                  <span className="text-[10px] uppercase tracking-[0.2em] text-stone-400 font-bold">Lucro do Mês</span>
-                  <span className="text-4xl font-light tracking-tight text-stone-800">{formatCurrency(stats.month)}</span>
+                  <span className="text-[10px] uppercase tracking-widest text-fog font-semibold">Lucro do Mês</span>
+                  <span className="text-2xl font-sans font-light tracking-tight text-plum tabular-nums">{formatCurrency(stats.month)}</span>
                 </div>
               </div>
 
               <section className="glass-card overflow-hidden">
-                <div className="p-8 border-b border-stone-50 flex justify-between items-center">
-                  <h3 className="text-2xl font-medium text-brand-accent">Próximos Atendimentos</h3>
+                <div className="p-8 border-b border-iris-light/30 flex justify-between items-center">
+                  <h3 className="text-2xl font-sans font-medium text-plum">Próximos Atendimentos</h3>
                   <button 
                     onClick={() => handleOpenModal('appointment')}
-                    className="text-brand-primary hover:text-brand-accent transition-colors text-sm font-bold flex items-center gap-2"
+                    className="text-brand-primary hover:text-iris-dark transition-colors duration-150 text-sm font-semibold flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:ring-offset-2 rounded-md px-2 py-1"
                   >
                     <Plus size={18} /> Novo Agendamento
                   </button>
                 </div>
-                <div className="divide-y divide-stone-50">
+                <div className="divide-y divide-iris-light/20">
                   {appointments
                     .filter(a => new Date(a.date) >= new Date())
                     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
@@ -393,41 +553,41 @@ export default function App() {
                       <div 
                         key={app.id} 
                         onClick={() => handleOpenModal('appointment', app)}
-                        className="p-6 flex items-center justify-between hover:bg-brand-bg/30 transition-all cursor-pointer group"
+                        className="p-6 flex items-center justify-between hover:bg-mist/60 transition-colors duration-150 cursor-pointer group"
                       >
                         <div className="flex items-center gap-6">
-                          <div className="w-14 h-14 bg-white border border-stone-100 rounded-2xl flex flex-col items-center justify-center text-brand-primary shadow-sm group-hover:shadow-md transition-all">
-                            <span className="text-[10px] font-bold uppercase tracking-widest">{new Date(app.date).toLocaleDateString('pt-BR', { weekday: 'short' })}</span>
+                          <div className="w-14 h-14 bg-white border border-iris-light/40 rounded-xl flex flex-col items-center justify-center text-brand-primary shadow-sm group-hover:shadow-md transition-all">
+                            <span className="text-[10px] font-bold uppercase tracking-widest">{new Date(app.date).toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '')}</span>
                             <span className="text-xl font-bold leading-none mt-1">{new Date(app.date).getDate()}</span>
                           </div>
                           <div>
-                            <p className="font-bold text-lg text-stone-800">
+                            <p className="font-semibold text-lg text-plum">
                               {app.clientName || clients.find(c => c.id === app.clientId)?.name || 'Excluído'}
                             </p>
-                            <p className="text-sm text-stone-400 font-medium mt-1">
-                              {services.find(s => s.id === app.serviceId)?.name} • {new Date(app.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                            <p className="text-sm text-dusk font-medium mt-1">
+                              {services.find(s => s.id === app.serviceId)?.name} • {new Date(app.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', hour12: false })}
                             </p>
                           </div>
                         </div>
                         <div className="flex items-center gap-6">
-                          <span className={`text-[10px] px-4 py-1.5 rounded-full font-bold uppercase tracking-[0.15em] ${
-                            app.status === PaymentStatus.PAID ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' :
+                          <span className={`text-xs px-3 py-1.5 rounded-full font-semibold uppercase tracking-wider ${
+                            app.status === PaymentStatus.PAID ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
                             app.status === PaymentStatus.CANCELED ? 'bg-rose-50 text-rose-600 border border-rose-100' :
-                            'bg-amber-50 text-amber-600 border border-amber-100'
+                            'bg-amber-50 text-amber-700 border border-amber-200'
                           }`}>
                             {app.status}
                           </span>
                           <div className="flex gap-2 transition-all">
                             <button 
                               onClick={(e) => { e.stopPropagation(); handleOpenModal('appointment', app); }}
-                              className="p-2.5 bg-white border border-stone-100 rounded-xl text-stone-400 hover:text-brand-primary hover:border-brand-primary/30 transition-all shadow-sm"
+                              className="p-2.5 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-brand-primary hover:bg-iris-light/20 active:scale-[0.97] transition-all duration-150 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:ring-offset-2"
                               title="Editar"
                             >
                               <Edit2 size={16} />
                             </button>
                             <button 
                               onClick={(e) => { e.stopPropagation(); deleteItem('appointment', app.id); }}
-                              className="p-2.5 bg-white border border-stone-100 rounded-xl text-stone-400 hover:text-rose-500 hover:border-rose-200 transition-all shadow-sm"
+                              className="p-2.5 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-rose-500 hover:border-rose-200 active:scale-[0.97] transition-all duration-150 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 focus-visible:ring-offset-2"
                               title="Excluir"
                             >
                               <Trash2 size={16} />
@@ -438,10 +598,10 @@ export default function App() {
                     ))}
                   {appointments.length === 0 && (
                     <div className="p-20 text-center">
-                      <div className="w-16 h-16 bg-stone-50 rounded-full flex items-center justify-center mx-auto mb-4 text-stone-300">
+                      <div className="w-16 h-16 bg-mist rounded-full flex items-center justify-center mx-auto mb-4 text-fog">
                         <Calendar size={32} />
                       </div>
-                      <p className="text-stone-400 font-serif italic">Nenhum agendamento futuro encontrado.</p>
+                      <p className="text-dusk font-sans italic">Nenhum agendamento futuro encontrado.</p>
                     </div>
                   )}
                 </div>
@@ -457,14 +617,14 @@ export default function App() {
               exit={{ opacity: 0, x: -20 }}
               className="space-y-8"
             >
-              <div className="flex justify-between items-end">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
                 <header>
-                  <h2 className="text-5xl font-medium text-brand-accent">Agenda</h2>
-                  <p className="text-stone-400 mt-2 text-lg font-serif italic">Seu fluxo de trabalho organizado.</p>
+                  <h2 className="text-5xl font-sans font-medium text-plum">Agenda</h2>
+                  <p className="text-dusk mt-2 text-lg font-sans italic">Seu fluxo de trabalho organizado.</p>
                 </header>
                 <button 
                   onClick={() => handleOpenModal('appointment')}
-                  className="bg-brand-primary text-white px-8 py-4 rounded-2xl shadow-xl shadow-brand-primary/20 flex items-center gap-2 hover:scale-105 transition-all font-bold"
+                  className="inline-flex items-center gap-2 bg-brand-primary hover:bg-iris-dark text-white font-semibold text-sm px-6 py-3 rounded-md shadow-[0_2px_8px_0_rgb(157_139_181/0.35)] hover:shadow-[0_4px_16px_0_rgb(157_139_181/0.45)] active:scale-[0.98] transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:ring-offset-2"
                 >
                   <Plus size={20} /> Novo Agendamento
                 </button>
@@ -491,62 +651,88 @@ export default function App() {
               exit={{ opacity: 0, x: -20 }}
               className="space-y-8"
             >
-              <div className="flex justify-between items-end">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
                 <header>
-                  <h2 className="text-5xl font-medium text-brand-accent">Clientes</h2>
-                  <p className="text-stone-400 mt-2 text-lg font-serif italic">Sua base de contatos fiel.</p>
+                  <h2 className="text-5xl font-sans font-medium text-plum">Clientes</h2>
+                  <p className="text-dusk mt-2 text-lg font-sans italic">Sua base de contatos fiel.</p>
                 </header>
                 <button 
                   onClick={() => handleOpenModal('client')}
-                  className="bg-brand-primary text-white px-8 py-4 rounded-2xl shadow-xl shadow-brand-primary/20 flex items-center gap-2 hover:scale-105 transition-all font-bold"
+                  className="inline-flex items-center gap-2 bg-brand-primary hover:bg-iris-dark text-white font-semibold text-sm px-6 py-3 rounded-md shadow-[0_2px_8px_0_rgb(157_139_181/0.35)] hover:shadow-[0_4px_16px_0_rgb(157_139_181/0.45)] active:scale-[0.98] transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:ring-offset-2"
                 >
                   <Plus size={20} /> Novo Cliente
                 </button>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {clients.map(client => (
-                  <div key={client.id} className="glass-card p-8 flex justify-between items-start group hover:shadow-xl hover:shadow-brand-primary/5 transition-all duration-500">
-                    <div>
-                      <h4 className="text-xl font-bold text-stone-800">{client.name}</h4>
-                      <div className="flex items-center gap-3 text-stone-400 mt-3 font-medium">
-                        <div className="w-8 h-8 bg-brand-bg rounded-lg flex items-center justify-center text-brand-primary">
+                {clients.map(client => {
+                  const lastAppointment = appointments
+                    .filter(a => a.clientId === client.id && new Date(a.date) <= new Date())
+                    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+                  const lastServiceDays = lastAppointment
+                    ? Math.floor((Date.now() - new Date(lastAppointment.date).getTime()) / 86400000)
+                    : null;
+                  const lastServiceLabel = lastServiceDays === null
+                    ? 'Sem Serviço'
+                    : lastServiceDays === 0
+                      ? 'Hoje'
+                      : lastServiceDays === 1
+                        ? '1 Dia'
+                        : `${lastServiceDays} Dias`;
+                  const lastServiceColor =
+                    lastServiceDays === null
+                      ? 'bg-mist/80 text-fog border-iris-light/40'
+                      : lastServiceDays < 15
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : lastServiceDays < 30
+                          ? 'bg-amber-50 text-amber-700 border-amber-200'
+                          : 'bg-rose-50 text-rose-600 border-rose-200';
+                  return (
+                  <div key={client.id} className="glass-card p-8 flex flex-col gap-5 group hover:shadow-[var(--shadow-raised)] hover:-translate-y-0.5 transition-all duration-200">
+                    <div className="min-w-0">
+                      <h4 className="text-xl font-semibold text-plum truncate">{client.name}</h4>
+                      <div className="flex items-center gap-3 text-dusk mt-3 font-medium min-w-0">
+                        <div className="w-8 h-8 shrink-0 bg-mist rounded-lg flex items-center justify-center text-brand-primary">
                           <Phone size={14} />
                         </div>
-                        <span className="text-sm">{client.phone}</span>
+                        <span className="text-sm truncate">{client.phone}</span>
+                      </div>
+                      <div className={`mt-3 inline-flex items-center rounded-md border px-2.5 py-1 text-xs font-semibold ${lastServiceColor}`}>
+                        {lastServiceLabel}
                       </div>
                     </div>
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={() => setHistoryClientId(client.id)}
-                          className="p-3 bg-white border border-stone-100 rounded-xl text-stone-400 hover:text-emerald-500 hover:border-emerald-200 transition-all shadow-sm"
-                          title="Ver Histórico"
-                        >
-                          <Clock size={18} />
-                        </button>
-                        <button 
-                          onClick={() => handleOpenModal('client', client)}
-                          className="p-3 bg-white border border-stone-100 rounded-xl text-stone-400 hover:text-brand-primary hover:border-brand-primary/30 transition-all shadow-sm"
-                          title="Editar"
-                        >
-                          <Edit2 size={18} />
-                        </button>
-                        <button 
-                          onClick={() => deleteItem('client', client.id)}
-                          className="p-3 bg-white border border-stone-100 rounded-xl text-stone-400 hover:text-rose-500 hover:border-rose-200 transition-all shadow-sm"
-                          title="Excluir"
-                        >
-                          <Trash2 size={18} />
-                        </button>
-                      </div>
+                    <div className="flex gap-2 justify-end border-t border-iris-light/20 pt-4">
+                      <button 
+                        onClick={() => setHistoryClientId(client.id)}
+                        className="p-3 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-emerald-500 hover:border-emerald-200 active:scale-[0.97] transition-all duration-150 shadow-sm"
+                        title="Ver Histórico"
+                      >
+                        <Clock size={18} />
+                      </button>
+                      <button 
+                        onClick={() => handleOpenModal('client', client)}
+                        className="p-3 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-brand-primary hover:bg-iris-light/20 active:scale-[0.97] transition-all duration-150 shadow-sm"
+                        title="Editar"
+                      >
+                        <Edit2 size={18} />
+                      </button>
+                      <button 
+                        onClick={() => deleteItem('client', client.id)}
+                        className="p-3 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-rose-500 hover:border-rose-200 active:scale-[0.97] transition-all duration-150 shadow-sm"
+                        title="Excluir"
+                      >
+                        <Trash2 size={18} />
+                      </button>
+                    </div>
                   </div>
-                ))}
+                  );
+                })}
                 {clients.length === 0 && (
-                  <div className="col-span-full p-32 text-center border-2 border-dashed border-stone-100 rounded-[2.5rem]">
-                    <div className="w-20 h-20 bg-stone-50 rounded-full flex items-center justify-center mx-auto mb-6 text-stone-200">
+                  <div className="col-span-full p-32 text-center border-2 border-dashed border-iris-light/40 rounded-3xl">
+                    <div className="w-20 h-20 bg-mist rounded-full flex items-center justify-center mx-auto mb-6 text-fog">
                       <Users size={40} />
                     </div>
-                    <p className="text-stone-400 font-serif italic text-lg">Nenhum cliente cadastrado ainda.</p>
+                    <p className="text-dusk font-sans italic text-lg">Nenhum cliente cadastrado ainda.</p>
                   </div>
                 )}
               </div>
@@ -561,14 +747,14 @@ export default function App() {
               exit={{ opacity: 0, x: -20 }}
               className="space-y-8"
             >
-              <div className="flex justify-between items-end">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
                 <header>
-                  <h2 className="text-5xl font-medium text-brand-accent">Serviços</h2>
-                  <p className="text-stone-400 mt-2 text-lg font-serif italic">Seu cardápio de beleza.</p>
+                  <h2 className="text-5xl font-sans font-medium text-plum">Serviços</h2>
+                  <p className="text-dusk mt-2 text-lg font-sans italic">Seu cardápio de beleza.</p>
                 </header>
                 <button 
                   onClick={() => handleOpenModal('service')}
-                  className="bg-brand-primary text-white px-8 py-4 rounded-2xl shadow-xl shadow-brand-primary/20 flex items-center gap-2 hover:scale-105 transition-all font-bold"
+                  className="inline-flex items-center gap-2 bg-brand-primary hover:bg-iris-dark text-white font-semibold text-sm px-6 py-3 rounded-md shadow-[0_2px_8px_0_rgb(157_139_181/0.35)] hover:shadow-[0_4px_16px_0_rgb(157_139_181/0.45)] active:scale-[0.98] transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:ring-offset-2"
                 >
                   <Plus size={20} /> Novo Serviço
                 </button>
@@ -576,31 +762,31 @@ export default function App() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {services.map(service => (
-                  <div key={service.id} className="glass-card p-8 flex justify-between items-center group hover:shadow-xl hover:shadow-brand-primary/5 transition-all duration-500">
-                    <div>
-                      <h4 className="text-xl font-bold text-stone-800">{service.name}</h4>
+                  <div key={service.id} className="glass-card p-8 flex flex-col gap-5 group hover:shadow-[var(--shadow-raised)] hover:-translate-y-0.5 transition-all duration-200">
+                    <div className="min-w-0">
+                      <h4 className="text-xl font-semibold text-plum truncate">{service.name}</h4>
                       <div className="flex items-center gap-2 text-brand-primary mt-2 font-bold text-lg">
                         <span>{formatCurrency(service.price)}</span>
                       </div>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 justify-end border-t border-iris-light/20 pt-4">
                       <button 
                         onClick={() => setHistoryServiceId(service.id)}
-                        className="p-3 bg-white border border-stone-100 rounded-xl text-stone-400 hover:text-emerald-500 hover:border-emerald-200 transition-all shadow-sm"
+                        className="p-3 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-emerald-500 hover:border-emerald-200 active:scale-[0.97] transition-all duration-150 shadow-sm"
                         title="Ver Histórico"
                       >
                         <Clock size={18} />
                       </button>
                       <button 
                         onClick={() => handleOpenModal('service', service)}
-                        className="p-3 bg-white border border-stone-100 rounded-xl text-stone-400 hover:text-brand-primary hover:border-brand-primary/30 transition-all shadow-sm"
+                        className="p-3 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-brand-primary hover:bg-iris-light/20 active:scale-[0.97] transition-all duration-150 shadow-sm"
                         title="Editar"
                       >
                         <Edit2 size={18} />
                       </button>
                       <button 
                         onClick={() => deleteItem('service', service.id)}
-                        className="p-3 bg-white border border-stone-100 rounded-xl text-stone-400 hover:text-rose-500 hover:border-rose-200 transition-all shadow-sm"
+                        className="p-3 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-rose-500 hover:border-rose-200 active:scale-[0.97] transition-all duration-150 shadow-sm"
                         title="Excluir"
                       >
                         <Trash2 size={18} />
@@ -620,8 +806,8 @@ export default function App() {
               className="space-y-8"
             >
               <header>
-                <h2 className="text-5xl font-medium text-brand-accent">Relatórios</h2>
-                <p className="text-stone-400 mt-2 text-lg font-serif italic">Analise o desempenho do seu negócio.</p>
+                <h2 className="text-5xl font-sans font-medium text-plum">Relatórios</h2>
+                <p className="text-dusk mt-2 text-lg font-sans italic">Analise o desempenho do seu negócio.</p>
               </header>
 
               <ReportsView 
@@ -632,6 +818,7 @@ export default function App() {
             </motion.div>
           )}
         </AnimatePresence>
+        )}
       </main>
 
       {/* Modal */}
@@ -643,25 +830,27 @@ export default function App() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setHistoryClientId(null)}
-              className="absolute inset-0 bg-stone-900/40 backdrop-blur-sm"
+              className="absolute inset-0 bg-plum/20 backdrop-blur-sm"
             />
             <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              initial={{ opacity: 0, scale: 0.96, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative bg-white w-full max-w-2xl rounded-[2.5rem] shadow-2xl overflow-hidden"
+              exit={{ opacity: 0, scale: 0.96, y: 20 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              className="relative bg-white w-full max-w-2xl rounded-xl overflow-hidden border border-iris-light/30"
+              style={{ boxShadow: 'var(--shadow-float)' }}
             >
               <div className="p-10">
-                <div className="flex justify-between items-center mb-8">
+                <div className="flex justify-between items-center mb-8 pb-4 border-b border-iris-light/30">
                   <div>
-                    <h3 className="text-3xl font-medium text-brand-accent">Histórico de Atendimentos</h3>
-                    <p className="text-stone-400 font-serif italic mt-1">
+                    <h3 className="text-2xl font-sans font-medium text-plum">Histórico de Atendimentos</h3>
+                    <p className="text-sm text-dusk font-sans italic mt-0.5">
                       {clients.find(c => c.id === historyClientId)?.name}
                     </p>
                   </div>
                   <button 
                     onClick={() => setHistoryClientId(null)}
-                    className="p-3 bg-brand-bg rounded-2xl text-stone-400 hover:text-stone-600 transition-all"
+                    className="p-3 bg-mist rounded-md text-dusk hover:text-plum transition-colors duration-150"
                   >
                     <XCircle size={24} />
                   </button>
@@ -674,19 +863,19 @@ export default function App() {
                     .map(app => {
                       const service = services.find(s => s.id === app.serviceId);
                       return (
-                        <div key={app.id} className="p-6 bg-brand-bg rounded-3xl border border-stone-100 flex justify-between items-center">
+                        <div key={app.id} className="p-6 bg-mist rounded-xl border border-iris-light/30 flex justify-between items-center">
                           <div>
-                            <p className="font-bold text-stone-800 text-lg">{service?.name || 'Serviço Excluído'}</p>
-                            <p className="text-sm text-stone-500 font-medium mt-1">
-                              {new Date(app.date).toLocaleDateString('pt-BR')} às {new Date(app.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                            <p className="font-semibold text-plum text-lg">{service?.name || 'Serviço Excluído'}</p>
+                            <p className="text-sm text-dusk font-medium mt-1">
+                              {new Date(app.date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })} às {new Date(app.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', hour12: false })}
                             </p>
                           </div>
                           <div className="flex items-center gap-4">
                             <span className="font-bold text-brand-accent">{formatCurrency(service?.price || 0)}</span>
-                            <span className={`text-[9px] px-3 py-1 rounded-full font-bold uppercase tracking-widest ${
-                              app.status === PaymentStatus.PAID ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' :
+                            <span className={`text-xs px-2.5 py-1 rounded-full font-semibold uppercase tracking-wider ${
+                              app.status === PaymentStatus.PAID ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
                               app.status === PaymentStatus.CANCELED ? 'bg-rose-50 text-rose-600 border border-rose-100' :
-                              'bg-amber-50 text-amber-600 border border-amber-100'
+                              'bg-amber-50 text-amber-700 border border-amber-200'
                             }`}>
                               {app.status}
                             </span>
@@ -696,7 +885,7 @@ export default function App() {
                     })}
                   {appointments.filter(a => a.clientId === historyClientId).length === 0 && (
                     <div className="py-20 text-center">
-                      <p className="text-stone-400 font-serif italic">Nenhum atendimento encontrado para este cliente.</p>
+                      <p className="text-dusk font-sans italic">Nenhum atendimento encontrado para este cliente.</p>
                     </div>
                   )}
                 </div>
@@ -712,25 +901,27 @@ export default function App() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setHistoryServiceId(null)}
-              className="absolute inset-0 bg-stone-900/40 backdrop-blur-sm"
+              className="absolute inset-0 bg-plum/20 backdrop-blur-sm"
             />
             <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              initial={{ opacity: 0, scale: 0.96, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative bg-white w-full max-w-2xl rounded-[2.5rem] shadow-2xl overflow-hidden"
+              exit={{ opacity: 0, scale: 0.96, y: 20 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              className="relative bg-white w-full max-w-2xl rounded-xl overflow-hidden border border-iris-light/30"
+              style={{ boxShadow: 'var(--shadow-float)' }}
             >
               <div className="p-10">
-                <div className="flex justify-between items-center mb-8">
+                <div className="flex justify-between items-center mb-8 pb-4 border-b border-iris-light/30">
                   <div>
-                    <h3 className="text-3xl font-medium text-brand-accent">Histórico do Serviço</h3>
-                    <p className="text-stone-400 font-serif italic mt-1">
+                    <h3 className="text-2xl font-sans font-medium text-plum">Histórico do Serviço</h3>
+                    <p className="text-sm text-dusk font-sans italic mt-0.5">
                       {services.find(s => s.id === historyServiceId)?.name}
                     </p>
                   </div>
                   <button 
                     onClick={() => setHistoryServiceId(null)}
-                    className="p-3 bg-brand-bg rounded-2xl text-stone-400 hover:text-stone-600 transition-all"
+                    className="p-3 bg-mist rounded-md text-dusk hover:text-plum transition-colors duration-150"
                   >
                     <XCircle size={24} />
                   </button>
@@ -743,20 +934,20 @@ export default function App() {
                     .map(app => {
                       const client = clients.find(c => c.id === app.clientId);
                       return (
-                        <div key={app.id} className="p-6 bg-brand-bg rounded-3xl border border-stone-100 flex justify-between items-center">
+                        <div key={app.id} className="p-6 bg-mist rounded-xl border border-iris-light/30 flex justify-between items-center">
                           <div>
-                            <p className="font-bold text-stone-800 text-lg">
+                            <p className="font-semibold text-plum text-lg">
                               {app.clientName || client?.name || 'Cliente Excluído'}
                             </p>
-                            <p className="text-sm text-stone-500 font-medium mt-1">
-                              {new Date(app.date).toLocaleDateString('pt-BR')} às {new Date(app.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                            <p className="text-sm text-dusk font-medium mt-1">
+                              {new Date(app.date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })} às {new Date(app.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', hour12: false })}
                             </p>
                           </div>
                           <div className="flex items-center gap-4">
-                            <span className={`text-[9px] px-3 py-1 rounded-full font-bold uppercase tracking-widest ${
-                              app.status === PaymentStatus.PAID ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' :
+                            <span className={`text-xs px-2.5 py-1 rounded-full font-semibold uppercase tracking-wider ${
+                              app.status === PaymentStatus.PAID ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
                               app.status === PaymentStatus.CANCELED ? 'bg-rose-50 text-rose-600 border border-rose-100' :
-                              'bg-amber-50 text-amber-600 border border-amber-100'
+                              'bg-amber-50 text-amber-700 border border-amber-200'
                             }`}>
                               {app.status}
                             </span>
@@ -766,7 +957,7 @@ export default function App() {
                     })}
                   {appointments.filter(a => a.serviceId === historyServiceId).length === 0 && (
                     <div className="py-20 text-center">
-                      <p className="text-stone-400 font-serif italic">Nenhum atendimento encontrado para este serviço.</p>
+                      <p className="text-dusk font-sans italic">Nenhum atendimento encontrado para este serviço.</p>
                     </div>
                   )}
                 </div>
@@ -782,20 +973,36 @@ export default function App() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsModalOpen(false)}
-              className="absolute inset-0 bg-stone-900/40 backdrop-blur-sm"
+              className="absolute inset-0 bg-plum/20 backdrop-blur-sm"
             />
             <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              initial={{ opacity: 0, scale: 0.96, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden"
+              exit={{ opacity: 0, scale: 0.96, y: 20 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              className="relative bg-white w-full max-w-md rounded-xl overflow-hidden border border-iris-light/30"
+              style={{ boxShadow: 'var(--shadow-float)' }}
             >
               <div className="p-10">
-                <h3 className="text-3xl font-medium text-brand-accent mb-8">
-                  {modalType === 'appointment' && (editingItem ? 'Editar Agendamento' : 'Novo Agendamento')}
-                  {modalType === 'client' && (editingItem ? 'Editar Cliente' : 'Cadastrar Cliente')}
-                  {modalType === 'service' && (editingItem ? 'Editar Serviço' : 'Cadastrar Serviço')}
-                </h3>
+                <div className="pb-6 mb-6 border-b border-iris-light/30 flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-2xl font-sans font-medium text-plum">
+                      {modalType === 'appointment' && (editingItem ? 'Editar Agendamento' : 'Novo Agendamento')}
+                      {modalType === 'client' && (editingItem ? 'Editar Cliente' : 'Cadastrar Cliente')}
+                      {modalType === 'service' && (editingItem ? 'Editar Serviço' : 'Cadastrar Serviço')}
+                    </h3>
+                    <p className="text-sm text-dusk mt-0.5">Preencha os dados abaixo.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setIsModalOpen(false); setEditingItem(null); }}
+                    className="p-2 rounded-md text-dusk hover:text-plum hover:bg-mist transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-brand-primary focus:ring-offset-2 shrink-0"
+                    title="Fechar"
+                    aria-label="Fechar"
+                  >
+                    <X size={24} />
+                  </button>
+                </div>
 
                 {modalType === 'client' && (
                   <form onSubmit={(e) => {
@@ -804,14 +1011,14 @@ export default function App() {
                     addClient(formData.get('name') as string, formData.get('phone') as string);
                   }} className="space-y-6">
                     <div>
-                      <label className="block text-xs font-bold uppercase tracking-[0.2em] text-stone-400 mb-3 ml-1">Nome Completo</label>
-                      <input name="name" defaultValue={(editingItem as Client)?.name} required className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all" placeholder="Ex: Maria Silva" />
+                      <label className="block text-xs font-semibold uppercase tracking-widest text-fog mb-2 ml-1">Nome Completo</label>
+                      <input name="name" defaultValue={(editingItem as Client)?.name} required className="w-full px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:bg-white focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 font-sans text-sm text-plum" placeholder="Ex: Maria Silva" />
                     </div>
                     <div>
-                      <label className="block text-xs font-bold uppercase tracking-[0.2em] text-stone-400 mb-3 ml-1">Telefone</label>
-                      <input name="phone" defaultValue={(editingItem as Client)?.phone} required className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all" placeholder="(11) 99999-9999" />
+                      <label className="block text-xs font-semibold uppercase tracking-widest text-fog mb-2 ml-1">Telefone</label>
+                      <input name="phone" defaultValue={(editingItem as Client)?.phone} required className="w-full px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:bg-white focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 font-sans text-sm text-plum" placeholder="(11) 99999-9999" />
                     </div>
-                    <button type="submit" className="w-full bg-brand-primary text-white py-5 rounded-2xl font-bold mt-6 shadow-xl shadow-brand-primary/30 hover:scale-[1.02] active:scale-[0.98] transition-all">
+                    <button type="submit" className="w-full inline-flex items-center justify-center gap-2 bg-brand-primary hover:bg-iris-dark text-white font-semibold text-sm py-3 rounded-md shadow-[0_2px_8px_0_rgb(157_139_181/0.35)] hover:shadow-[0_4px_16px_0_rgb(157_139_181/0.45)] active:scale-[0.98] transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:ring-offset-2">
                       {editingItem ? 'Salvar Alterações' : 'Salvar Cliente'}
                     </button>
                   </form>
@@ -824,21 +1031,21 @@ export default function App() {
                     addService(formData.get('name') as string, Number(formData.get('price')));
                   }} className="space-y-6">
                     <div>
-                      <label className="block text-xs font-bold uppercase tracking-[0.2em] text-stone-400 mb-3 ml-1">Nome do Serviço</label>
-                      <input name="name" defaultValue={(editingItem as Service)?.name} required className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all" placeholder="Ex: Esmaltação em Gel" />
+                      <label className="block text-xs font-semibold uppercase tracking-widest text-fog mb-2 ml-1">Nome do Serviço</label>
+                      <input name="name" defaultValue={(editingItem as Service)?.name} required className="w-full px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:bg-white focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 font-sans text-sm text-plum" placeholder="Ex: Esmaltação em Gel" />
                     </div>
                     <div>
-                      <label className="block text-xs font-bold uppercase tracking-[0.2em] text-stone-400 mb-3 ml-1">Valor (R$)</label>
-                      <input name="price" type="number" step="0.01" defaultValue={(editingItem as Service)?.price} required className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all" placeholder="0,00" />
+                      <label className="block text-xs font-semibold uppercase tracking-widest text-fog mb-2 ml-1">Valor (R$)</label>
+                      <input name="price" type="number" step="0.01" defaultValue={(editingItem as Service)?.price} required className="w-full px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:bg-white focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 font-sans text-sm text-plum" placeholder="0,00" />
                     </div>
-                    <button type="submit" className="w-full bg-brand-primary text-white py-5 rounded-2xl font-bold mt-6 shadow-xl shadow-brand-primary/30 hover:scale-[1.02] active:scale-[0.98] transition-all">
+                    <button type="submit" className="w-full inline-flex items-center justify-center gap-2 bg-brand-primary hover:bg-iris-dark text-white font-semibold text-sm py-3 rounded-md shadow-[0_2px_8px_0_rgb(157_139_181/0.35)] hover:shadow-[0_4px_16px_0_rgb(157_139_181/0.45)] active:scale-[0.98] transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:ring-offset-2">
                       {editingItem ? 'Salvar Alterações' : 'Salvar Serviço'}
                     </button>
                   </form>
                 )}
 
                 {modalType === 'appointment' && (
-                  <form onSubmit={(e) => {
+                  <form onSubmit={async (e) => {
                     e.preventDefault();
                     const formData = new FormData(e.currentTarget);
                     
@@ -852,9 +1059,15 @@ export default function App() {
                     } else if (clientMode === 'new') {
                       const name = formData.get('newName') as string;
                       const phone = formData.get('newPhone') as string;
-                      const newClient: Client = { id: generateId(), name, phone };
-                      setClients(prev => [...prev, newClient]);
-                      finalClientId = newClient.id;
+                      const { data, error } = await supabase.from('clients').insert({ name, phone }).select().single();
+                      if (error) {
+                        console.error('NailCare create client in appointment error:', error);
+                        return;
+                      }
+                      if (data) {
+                        setClients(prev => [...prev, mapClient(data)]);
+                        finalClientId = data.id;
+                      }
                     }
 
                     addAppointment(
@@ -865,33 +1078,33 @@ export default function App() {
                     );
                   }} className="space-y-6">
                     <div>
-                      <label className="block text-xs font-bold uppercase tracking-[0.2em] text-stone-400 mb-3 ml-1">Opção de Cliente</label>
-                      <div className="flex bg-brand-bg p-1.5 rounded-[1.5rem] border border-stone-100 mb-4">
+                      <label className="block text-xs font-semibold uppercase tracking-widest text-fog mb-2 ml-1">Opção de Cliente</label>
+                      <div className="flex bg-mist p-1.5 rounded-md border border-iris-light/50 mb-4">
                         <button 
                           type="button"
                           onClick={() => setClientMode('existing')}
-                          className={`flex-1 py-3 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all ${clientMode === 'existing' ? 'bg-white text-brand-primary shadow-lg shadow-brand-primary/10' : 'text-stone-400 hover:text-stone-500'}`}
+                          className={`flex-1 py-3 rounded-md text-xs font-semibold uppercase tracking-wider transition-colors duration-150 ${clientMode === 'existing' ? 'bg-white text-brand-primary shadow-sm' : 'text-dusk hover:text-plum'}`}
                         >
                           Existente
                         </button>
                         <button 
                           type="button"
                           onClick={() => setClientMode('new')}
-                          className={`flex-1 py-3 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all ${clientMode === 'new' ? 'bg-white text-brand-primary shadow-lg shadow-brand-primary/10' : 'text-stone-400 hover:text-stone-500'}`}
+                          className={`flex-1 py-3 rounded-md text-xs font-semibold uppercase tracking-wider transition-colors duration-150 ${clientMode === 'new' ? 'bg-white text-brand-primary shadow-sm' : 'text-dusk hover:text-plum'}`}
                         >
                           Cadastrar
                         </button>
                         <button 
                           type="button"
                           onClick={() => setClientMode('quick')}
-                          className={`flex-1 py-3 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all ${clientMode === 'quick' ? 'bg-white text-brand-primary shadow-lg shadow-brand-primary/10' : 'text-stone-400 hover:text-stone-500'}`}
+                          className={`flex-1 py-3 rounded-md text-xs font-semibold uppercase tracking-wider transition-colors duration-150 ${clientMode === 'quick' ? 'bg-white text-brand-primary shadow-sm' : 'text-dusk hover:text-plum'}`}
                         >
                           Apenas Nome
                         </button>
                       </div>
 
                       {clientMode === 'existing' && (
-                        <select name="clientId" defaultValue={(editingItem as Appointment)?.clientId} required className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all appearance-none cursor-pointer">
+                        <select name="clientId" defaultValue={(editingItem as Appointment)?.clientId} required className="w-full px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 appearance-none cursor-pointer font-sans text-sm text-plum">
                           <option value="">Selecione um cliente</option>
                           {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                         </select>
@@ -899,71 +1112,210 @@ export default function App() {
 
                       {clientMode === 'new' && (
                         <div className="space-y-4">
-                          <input name="newName" required className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all" placeholder="Nome Completo" />
-                          <input name="newPhone" required className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all" placeholder="Telefone" />
+                          <input name="newName" required className="w-full px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:bg-white focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 font-sans text-sm text-plum" placeholder="Nome Completo" />
+                          <input name="newPhone" required className="w-full px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:bg-white focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 font-sans text-sm text-plum" placeholder="Telefone" />
                         </div>
                       )}
 
                       {clientMode === 'quick' && (
-                        <input name="quickName" defaultValue={(editingItem as Appointment)?.clientName} required className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all" placeholder="Nome do Cliente" />
+                        <input name="quickName" defaultValue={(editingItem as Appointment)?.clientName} required className="w-full px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:bg-white focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 font-sans text-sm text-plum" placeholder="Nome do Cliente" />
                       )}
                     </div>
                     <div>
-                      <label className="block text-xs font-bold uppercase tracking-[0.2em] text-stone-400 mb-3 ml-1">Serviço</label>
-                      <select name="serviceId" defaultValue={(editingItem as Appointment)?.serviceId} required className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all appearance-none cursor-pointer">
+                      <label className="block text-xs font-semibold uppercase tracking-widest text-fog mb-2 ml-1">Serviço</label>
+                      <select name="serviceId" defaultValue={(editingItem as Appointment)?.serviceId} required className="w-full px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 appearance-none cursor-pointer font-sans text-sm text-plum">
                         <option value="">Selecione um serviço</option>
                         {services.map(s => <option key={s.id} value={s.id}>{s.name} ({formatCurrency(s.price)})</option>)}
                       </select>
                     </div>
-                    <div className="grid grid-cols-2 gap-6">
-                      <div>
-                        <label className="block text-xs font-bold uppercase tracking-[0.2em] text-stone-400 mb-3 ml-1">Data</label>
+                    <div ref={datePickerRef} className="grid grid-cols-2 gap-4 sm:gap-6">
+                      <div className="min-w-0 overflow-hidden">
+                        <label className="block text-xs font-semibold uppercase tracking-widest text-fog mb-2 ml-1">Data</label>
                         <input 
-                          type="date" 
-                          value={modalDate}
-                          onChange={(e) => setModalDate(e.target.value)}
-                          required 
-                          className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all" 
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="DD/MM/AAAA"
+                          value={modalDateDisplay}
+                          onChange={(e) => {
+                            const masked = maskDateDDMMAAAA(e.target.value);
+                            setModalDateDisplay(masked);
+                            const ymd = parseDDMMAAAAToYMD(masked);
+                            setModalDate(ymd || '');
+                          }}
+                          onClick={() => {
+                            if (isDatePickerOpen) {
+                              setIsDatePickerOpen(false);
+                            } else {
+                              if (modalDate) setCalendarViewMonth(new Date(modalDate));
+                              else setCalendarViewMonth(new Date());
+                              setIsDatePickerOpen(true);
+                            }
+                          }}
+                          required
+                          pattern="\d{2}/\d{2}/\d{4}"
+                          maxLength={10}
+                          title="Clique para abrir ou fechar o calendário"
+                          className="w-full min-w-0 px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 font-sans text-sm text-plum cursor-pointer" 
                         />
                       </div>
-                      <div>
-                        <label className="block text-xs font-bold uppercase tracking-[0.2em] text-stone-400 mb-3 ml-1">Hora</label>
-                        <input 
-                          type="time" 
-                          value={modalTime}
-                          onChange={(e) => setModalTime(e.target.value)}
-                          required 
-                          className="w-full px-6 py-4 rounded-2xl bg-brand-bg border border-stone-100 focus:outline-none focus:ring-4 focus:ring-brand-primary/10 transition-all" 
-                        />
+                      <div className="min-w-0">
+                        <label className="block text-xs font-semibold uppercase tracking-widest text-fog mb-2 ml-1">Hora (24h)</label>
+                        <div className="flex gap-2">
+                          <select
+                            value={modalTime ? (modalTime.split(':')[0] ?? '09') : '09'}
+                            onChange={(e) => {
+                              const [, m] = (modalTime || '09:00').split(':');
+                              setModalTime(`${e.target.value.padStart(2, '0')}:${(m || '00').padStart(2, '0')}`);
+                            }}
+                            required
+                            className="flex-1 px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 appearance-none cursor-pointer font-sans text-sm text-plum"
+                          >
+                            {Array.from({ length: 24 }, (_, i) => i).map((h) => (
+                              <option key={h} value={String(h).padStart(2, '0')}>{String(h).padStart(2, '0')}</option>
+                            ))}
+                          </select>
+                          <span className="flex items-center text-plum font-semibold">:</span>
+                          <select
+                            value={(() => {
+                              const min = modalTime ? parseInt(modalTime.split(':')[1] ?? '0', 10) : 0;
+                              const snapped = Math.round(min / 5) * 5;
+                              return String(Math.min(55, Math.max(0, snapped))).padStart(2, '0');
+                            })()}
+                            onChange={(e) => {
+                              const [h] = (modalTime || '09:00').split(':');
+                              setModalTime(`${(h || '09').padStart(2, '0')}:${e.target.value.padStart(2, '0')}`);
+                            }}
+                            required
+                            className="flex-1 px-4 py-3 rounded-md bg-mist border border-iris-light/50 focus:outline-none focus:border-brand-primary focus:ring-2 focus:ring-brand-primary/20 transition-all duration-150 appearance-none cursor-pointer font-sans text-sm text-plum"
+                          >
+                            {Array.from({ length: 12 }, (_, i) => i * 5).map((m) => (
+                              <option key={m} value={String(m).padStart(2, '0')}>{String(m).padStart(2, '0')}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <p className="text-[10px] text-fog mt-1.5 ml-1">Ex.: 13:05</p>
                       </div>
+                      <AnimatePresence>
+                        {isDatePickerOpen && (
+                          <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: 'auto' }}
+                            exit={{ opacity: 0, height: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="col-span-2 overflow-hidden"
+                          >
+                            <div className="mt-2 rounded-xl border border-iris-light/30 bg-mist/30 p-4">
+                              <div className="flex items-center justify-between mb-3">
+                                <button
+                                  type="button"
+                                  onClick={() => setCalendarViewMonth((m) => subMonths(m, 1))}
+                                  className="p-2 rounded-md hover:bg-white text-fog hover:text-brand-primary border border-iris-light/40 transition-colors"
+                                >
+                                  <ChevronLeft size={18} />
+                                </button>
+                                <span className="text-sm font-semibold text-plum capitalize">
+                                  {format(calendarViewMonth, 'MMMM yyyy', { locale: ptBR })}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setCalendarViewMonth((m) => addMonths(m, 1))}
+                                  className="p-2 rounded-md hover:bg-white text-fog hover:text-brand-primary border border-iris-light/40 transition-colors"
+                                >
+                                  <ChevronRight size={18} />
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-7 gap-0.5 mb-2">
+                                {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map((d) => (
+                                  <div key={d} className="text-center text-[10px] font-semibold uppercase tracking-widest text-fog py-1">
+                                    {d}
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="grid grid-cols-7 gap-0.5">
+                                {eachDayOfInterval({
+                                  start: startOfWeek(startOfMonth(calendarViewMonth)),
+                                  end: endOfWeek(endOfMonth(calendarViewMonth)),
+                                }).map((day) => {
+                                  const isCurrentMonth = isSameMonth(day, calendarViewMonth);
+                                  const selectedYMD = modalDate || '';
+                                  const isSelected = selectedYMD && isSameDay(day, new Date(selectedYMD));
+                                  const isTodayDay = isToday(day);
+                                  return (
+                                    <button
+                                      key={day.toISOString()}
+                                      type="button"
+                                      onClick={() => {
+                                        const ymd = format(day, 'yyyy-MM-dd');
+                                        setModalDate(ymd);
+                                        setModalDateDisplay(formatYMDToDDMMAAAA(ymd));
+                                        setIsDatePickerOpen(false);
+                                      }}
+                                      className={`min-h-[36px] rounded-md text-sm font-medium transition-colors ${
+                                        !isCurrentMonth ? 'text-fog/70 hover:bg-white/60' : 'text-plum'
+                                      } ${isSelected ? 'bg-brand-primary text-white shadow-sm' : ''} ${
+                                        isTodayDay && !isSelected ? 'bg-brand-primary/15 text-brand-primary font-bold' : ''
+                                      } ${isCurrentMonth && !isSelected && !isTodayDay ? 'hover:bg-white' : ''}`}
+                                    >
+                                      {format(day, 'd')}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <div className="flex gap-2 mt-3">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const today = new Date();
+                                    const ymd = format(today, 'yyyy-MM-dd');
+                                    setModalDate(ymd);
+                                    setModalDateDisplay(formatYMDToDDMMAAAA(ymd));
+                                    setCalendarViewMonth(today);
+                                    setIsDatePickerOpen(false);
+                                  }}
+                                  className="flex-1 py-2 rounded-md border border-iris-light/40 text-dusk hover:bg-white hover:text-brand-primary font-semibold text-xs uppercase tracking-wider transition-colors"
+                                >
+                                  Hoje
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setIsDatePickerOpen(false)}
+                                  className="px-4 py-2 rounded-md border border-iris-light/40 text-dusk hover:bg-white font-semibold text-xs uppercase tracking-wider transition-colors"
+                                >
+                                  Fechar
+                                </button>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
                     <div>
-                      <label className="block text-xs font-bold uppercase tracking-[0.2em] text-stone-400 mb-3 ml-1">Status do Pagamento</label>
-                      <div className="flex bg-brand-bg p-1.5 rounded-[1.5rem] border border-stone-100">
+                      <label className="block text-xs font-semibold uppercase tracking-widest text-fog mb-2 ml-1">Status do Pagamento</label>
+                      <div className="flex bg-mist p-1.5 rounded-md border border-iris-light/50">
                         <button 
                           type="button"
                           onClick={() => setModalStatus(PaymentStatus.PAID)}
-                          className={`flex-1 py-3 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${modalStatus === PaymentStatus.PAID ? 'bg-white text-emerald-600 shadow-lg shadow-emerald-100' : 'text-stone-400 hover:text-stone-500'}`}
+                          className={`flex-1 py-3 rounded-md text-xs font-semibold uppercase tracking-wider transition-colors duration-150 flex items-center justify-center gap-2 ${modalStatus === PaymentStatus.PAID ? 'bg-white text-emerald-700 shadow-sm border border-emerald-100' : 'text-dusk hover:text-plum'}`}
                         >
                           <CheckCircle2 size={14} /> Pago
                         </button>
                         <button 
                           type="button"
                           onClick={() => setModalStatus(PaymentStatus.PENDING)}
-                          className={`flex-1 py-3 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${modalStatus === PaymentStatus.PENDING ? 'bg-white text-amber-600 shadow-lg shadow-amber-100' : 'text-stone-400 hover:text-stone-500'}`}
+                          className={`flex-1 py-3 rounded-md text-xs font-semibold uppercase tracking-wider transition-colors duration-150 flex items-center justify-center gap-2 ${modalStatus === PaymentStatus.PENDING ? 'bg-white text-amber-700 shadow-sm border border-amber-200' : 'text-dusk hover:text-plum'}`}
                         >
                           <Clock size={14} /> Pendente
                         </button>
                         <button 
                           type="button"
                           onClick={() => setModalStatus(PaymentStatus.CANCELED)}
-                          className={`flex-1 py-3 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${modalStatus === PaymentStatus.CANCELED ? 'bg-white text-rose-600 shadow-lg shadow-rose-100' : 'text-stone-400 hover:text-stone-500'}`}
+                          className={`flex-1 py-3 rounded-md text-xs font-semibold uppercase tracking-wider transition-colors duration-150 flex items-center justify-center gap-2 ${modalStatus === PaymentStatus.CANCELED ? 'bg-white text-rose-600 shadow-sm border border-rose-200' : 'text-dusk hover:text-plum'}`}
                         >
                           <XCircle size={14} /> Cancelado
                         </button>
                       </div>
                     </div>
-                    <button type="submit" className="w-full bg-brand-primary text-white py-5 rounded-2xl font-bold mt-6 shadow-xl shadow-brand-primary/30 hover:scale-[1.02] active:scale-[0.98] transition-all">
+                    <button type="submit" className="w-full inline-flex items-center justify-center gap-2 bg-brand-primary hover:bg-iris-dark text-white font-semibold text-sm py-3 rounded-md shadow-[0_2px_8px_0_rgb(157_139_181/0.35)] hover:shadow-[0_4px_16px_0_rgb(157_139_181/0.45)] active:scale-[0.98] transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:ring-offset-2">
                       {editingItem ? 'Salvar Alterações' : 'Confirmar Agendamento'}
                     </button>
                   </form>
