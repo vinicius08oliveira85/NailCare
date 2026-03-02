@@ -89,7 +89,13 @@ function toWhatsAppPhone(phone: string): string {
   return digits.startsWith('55') ? digits : `55${digits}`;
 }
 
-function whatsAppMessage(clientName: string, lastServiceDays: number | null): string {
+const WHATSAPP_SERVICE_MESSAGES: Record<string, { visitLabel: string; ctaPart: string }> = {
+  'Manicure': { visitLabel: 'Unhas da mão (Manicure)', ctaPart: 'as mãos impecáveis' },
+  'Pedicure': { visitLabel: 'unhas do Pé (Pedicure)', ctaPart: 'os pés impecáveis' },
+  'Combo (Mão e Pé)': { visitLabel: 'unhas da Mão e do Pé (Combo (Mão e Pé))', ctaPart: 'mãos e pés impecáveis' },
+};
+
+function whatsAppMessage(clientName: string, lastServiceDays: number | null, serviceName?: string | null): string {
   const name = clientName || 'Cliente';
   if (lastServiceDays === null) {
     return `Olá, ${name}! Tudo bem? Sou a Juliana. 🌸
@@ -99,9 +105,12 @@ Passando para te convidar a conhecer nosso espaço e dar aquele up no visual das
 Gostaria de consultar nossos horários disponíveis para esta semana? Será um prazer te atender!`;
   }
   const n = lastServiceDays;
-  return `Oi, ${name}! Tudo bem? Notamos que sua última visita foi há ${n} dias.
+  const config = serviceName ? WHATSAPP_SERVICE_MESSAGES[serviceName] : undefined;
+  const visitLabel = config?.visitLabel ?? (serviceName ?? 'Serviço');
+  const ctaPart = config?.ctaPart ?? 'suas unhas em dia';
+  return `Oi, ${name}! Como você está? Notei que sua última visita para ${visitLabel} foi há ${n} dias.
 
-Passamos para lembrar que este é o período ideal para realizar a manutenção e garantir que suas unhas continuem impecáveis e saudáveis. 💅 Vamos agendar sua revisão para esta semana? Estamos com alguns horários disponíveis e adoraríamos ver você por aqui!`;
+Geralmente, esse é o período ideal para trocar o esmalte e manter a saúde das suas unhas em dia. Que tal garantir seu horário para esta semana e continuar com ${ctaPart}? Estamos à disposição para encontrar o melhor momento para você!`;
 }
 
 function WhatsAppIcon({ size = 18 }: { size?: number }) {
@@ -781,14 +790,17 @@ export default function App() {
                     const lastServiceDays = lastAppointment
                       ? Math.floor((Date.now() - new Date(lastAppointment.date).getTime()) / 86400000)
                       : null;
-                    return { client, lastServiceDays };
+                    const lastServiceName = lastAppointment
+                      ? services.find(s => s.id === lastAppointment.serviceId)?.name ?? null
+                      : null;
+                    return { client, lastServiceDays, lastServiceName };
                   })
                   .sort((a, b) => {
                     const daysA = a.lastServiceDays ?? -1;
                     const daysB = b.lastServiceDays ?? -1;
                     return daysB - daysA;
                   })
-                  .map(({ client, lastServiceDays }) => {
+                  .map(({ client, lastServiceDays, lastServiceName }) => {
                   const lastServiceLabel = lastServiceDays === null
                     ? 'Sem Serviço'
                     : lastServiceDays === 0
@@ -806,7 +818,7 @@ export default function App() {
                           : 'bg-rose-50 text-rose-600 border-rose-200';
                   const waPhone = toWhatsAppPhone(client.phone);
                   const waUrl = waPhone
-                    ? `https://wa.me/${waPhone}?text=${encodeURIComponent(whatsAppMessage(client.name, lastServiceDays))}`
+                    ? `https://wa.me/${waPhone}?text=${encodeURIComponent(whatsAppMessage(client.name, lastServiceDays, lastServiceName))}`
                     : null;
                   return (
                   <div key={client.id} className="glass-card p-8 flex flex-col gap-5 group hover:shadow-[var(--shadow-raised)] hover:-translate-y-0.5 transition-all duration-200">
