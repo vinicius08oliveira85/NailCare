@@ -71,14 +71,15 @@ function mapClient(row: { id: string; name: string; phone: string }): Client {
 function mapService(row: { id: string; name: string; price: number }): Service {
   return { id: row.id, name: row.name, price: Number(row.price) };
 }
-function mapAppointment(row: { id: string; client_id: string | null; client_name: string | null; service_id: string; date: string; status: string }): Appointment {
+function mapAppointment(row: { id: string; client_id: string | null; client_name: string | null; service_id: string; date: string; status: string; travel_fee?: number }): Appointment {
   return {
     id: row.id,
     clientId: row.client_id ?? undefined,
     clientName: row.client_name ?? undefined,
     serviceId: row.service_id,
     date: row.date,
-    status: row.status as PaymentStatus
+    status: row.status as PaymentStatus,
+    travelFee: Number(row.travel_fee ?? 0)
   };
 }
 
@@ -163,6 +164,7 @@ export default function App() {
   const [calendarViewMonth, setCalendarViewMonth] = useState(() => new Date());
   const datePickerRef = useRef<HTMLDivElement>(null);
   const [modalTime, setModalTime] = useState<string>(''); // HH:mm
+  const [modalIncludeTravelFee, setModalIncludeTravelFee] = useState(false);
   const [clientMode, setClientMode] = useState<'existing' | 'new' | 'quick'>('existing');
   const [historyClientId, setHistoryClientId] = useState<string | null>(null);
   const [historyServiceId, setHistoryServiceId] = useState<string | null>(null);
@@ -266,7 +268,7 @@ export default function App() {
         .filter(a => a.status === PaymentStatus.PAID)
         .reduce((acc, curr) => {
           const service = services.find(s => s.id === curr.serviceId);
-          return acc + (service?.price || 0);
+          return acc + (service?.price || 0) + (curr.travelFee ?? 0);
         }, 0);
     };
 
@@ -291,6 +293,7 @@ export default function App() {
     if (type === 'appointment') {
       setModalStatus(item?.status || PaymentStatus.PENDING);
       setClientMode(item?.clientId ? 'existing' : (item?.clientName ? 'quick' : 'existing'));
+      setModalIncludeTravelFee(Number((item as Appointment)?.travelFee ?? 0) > 0);
       const date = item?.date ? new Date(item.date) : new Date();
       const ymd = date.toISOString().split('T')[0];
       setModalDate(ymd);
@@ -338,28 +341,33 @@ export default function App() {
     }
   };
 
-  const addAppointment = async (clientId: string | undefined, clientName: string | undefined, serviceId: string, status: PaymentStatus) => {
+  const TRAVEL_FEE_AMOUNT = 10;
+  const addAppointment = async (clientId: string | undefined, clientName: string | undefined, serviceId: string, status: PaymentStatus, travelFee: number) => {
     const combinedDate = new Date(`${modalDate}T${modalTime}`);
     const finalDate = combinedDate.toISOString();
+    const payload = {
+      client_id: clientId ?? null,
+      client_name: clientName ?? null,
+      service_id: serviceId,
+      date: finalDate,
+      status,
+      travel_fee: travelFee
+    };
+    const payloadWithoutTravelFee = { ...payload };
+    delete (payloadWithoutTravelFee as Record<string, unknown>).travel_fee;
     try {
       if (editingItem && 'status' in editingItem) {
-        const { data, error } = await supabase.from('appointments').update({
-          client_id: clientId ?? null,
-          client_name: clientName ?? null,
-          service_id: serviceId,
-          date: finalDate,
-          status
-        }).eq('id', editingItem.id).select().single();
+        let { data, error } = await supabase.from('appointments').update(payload).eq('id', editingItem.id).select().single();
+        if (error && (error.code === '42703' || /column.*travel_fee|travel_fee.*does not exist/i.test(String(error.message)))) {
+          ({ data, error } = await supabase.from('appointments').update(payloadWithoutTravelFee).eq('id', editingItem.id).select().single());
+        }
         if (error) throw error;
         if (data) setAppointments(appointments.map(a => a.id === editingItem.id ? mapAppointment(data) : a));
       } else {
-        const { data, error } = await supabase.from('appointments').insert({
-          client_id: clientId ?? null,
-          client_name: clientName ?? null,
-          service_id: serviceId,
-          date: finalDate,
-          status
-        }).select().single();
+        let { data, error } = await supabase.from('appointments').insert(payload).select().single();
+        if (error && (error.code === '42703' || /column.*travel_fee|travel_fee.*does not exist/i.test(String(error.message)))) {
+          ({ data, error } = await supabase.from('appointments').insert(payloadWithoutTravelFee).select().single());
+        }
         if (error) throw error;
         if (data) setAppointments(prev => [...prev, mapAppointment(data)]);
       }
@@ -957,7 +965,7 @@ export default function App() {
                             </p>
                           </div>
                           <div className="flex items-center gap-4">
-                            <span className="font-bold text-brand-accent">{formatCurrency(service?.price || 0)}</span>
+                            <span className="font-bold text-brand-accent">{formatCurrency((service?.price || 0) + (app.travelFee ?? 0))}</span>
                             <span className={`text-xs px-2.5 py-1 rounded-full font-semibold uppercase tracking-wider ${
                               app.status === PaymentStatus.PAID ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
                               app.status === PaymentStatus.CANCELED ? 'bg-rose-50 text-rose-600 border border-rose-100' :
@@ -1156,11 +1164,12 @@ export default function App() {
                       }
                     }
 
-                    addAppointment(
+                    await addAppointment(
                       finalClientId,
                       finalClientName,
                       formData.get('serviceId') as string,
-                      modalStatus
+                      modalStatus,
+                      formData.get('includeTravelFee') === 'on' ? TRAVEL_FEE_AMOUNT : 0
                     );
                   }} className="space-y-6">
                     <div>
@@ -1213,6 +1222,19 @@ export default function App() {
                         <option value="">Selecione um serviço</option>
                         {services.map(s => <option key={s.id} value={s.id}>{s.name} ({formatCurrency(s.price)})</option>)}
                       </select>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="checkbox"
+                        name="includeTravelFee"
+                        id="includeTravelFee"
+                        checked={modalIncludeTravelFee}
+                        onChange={(e) => setModalIncludeTravelFee(e.target.checked)}
+                        className="w-4 h-4 rounded border-iris-light/50 text-brand-primary focus:ring-brand-primary/20"
+                      />
+                      <label htmlFor="includeTravelFee" className="text-sm font-medium text-plum cursor-pointer">
+                        Incluir taxa de deslocamento ({formatCurrency(10)})
+                      </label>
                     </div>
                     <div ref={datePickerRef} className="grid grid-cols-2 gap-4 sm:gap-6">
                       <div className="min-w-0 overflow-hidden">

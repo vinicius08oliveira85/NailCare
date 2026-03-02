@@ -23,6 +23,8 @@ export interface Appointment {
   serviceId: string;
   date: string; // ISO string
   status: PaymentStatus;
+  /** Taxa de deslocamento em reais (ex.: 10). Zero quando não aplicável. */
+  travelFee?: number;
 }
 
 export interface DashboardStats {

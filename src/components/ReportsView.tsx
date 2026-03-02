@@ -79,7 +79,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ appointments, services
   const totalProfit = useMemo(() => {
     return filteredAppointments.reduce((acc, app) => {
       const service = services.find(s => s.id === app.serviceId);
-      return acc + (service?.price || 0);
+      return acc + (service?.price || 0) + (app.travelFee ?? 0);
     }, 0);
   }, [filteredAppointments, services]);
 
@@ -93,7 +93,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ appointments, services
         if (!data[service.id]) {
           data[service.id] = { name: service.name, value: 0 };
         }
-        data[service.id].value += service.price;
+        data[service.id].value += service.price + (app.travelFee ?? 0);
       }
     });
 
@@ -114,7 +114,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ appointments, services
           .filter(app => isSameDay(parseISO(app.date), day))
           .reduce((acc, app) => {
             const s = services.find(srv => srv.id === app.serviceId);
-            return acc + (s?.price || 0);
+            return acc + (s?.price || 0) + (app.travelFee ?? 0);
           }, 0);
         return {
           label: format(day, 'EEE', { locale: ptBR }),
@@ -135,7 +135,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ appointments, services
             .filter(app => isSameDay(parseISO(app.date), day))
             .reduce((acc, app) => {
               const s = services.find(srv => srv.id === app.serviceId);
-              return acc + (s?.price || 0);
+              return acc + (s?.price || 0) + (app.travelFee ?? 0);
             }, 0);
           return {
             label: format(day, 'dd/MM'),
@@ -149,7 +149,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ appointments, services
             .filter(app => isSameMonth(parseISO(app.date), month))
             .reduce((acc, app) => {
               const s = services.find(srv => srv.id === app.serviceId);
-              return acc + (s?.price || 0);
+              return acc + (s?.price || 0) + (app.travelFee ?? 0);
             }, 0);
           return {
             label: format(month, 'MMM', { locale: ptBR }),
@@ -389,7 +389,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ appointments, services
                           <div className="text-sm text-dusk">{service?.name || 'Serviço'}</div>
                         </td>
                         <td className="px-5 py-3.5 text-right">
-                          <div className="text-sm font-bold text-brand-accent tabular-nums">{formatCurrency(service?.price || 0)}</div>
+                          <div className="text-sm font-bold text-brand-accent tabular-nums">{formatCurrency((service?.price || 0) + (app.travelFee ?? 0))}</div>
                         </td>
                       </tr>
                     );

@@ -227,7 +227,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                   </div>
 
                   <div className="flex justify-between items-center pt-4 border-t border-iris-light/20">
-                    <span className="text-sm font-bold text-brand-accent">{formatCurrency(service?.price || 0)}</span>
+                    <span className="text-sm font-bold text-brand-accent">{formatCurrency((service?.price || 0) + (app.travelFee ?? 0))}</span>
                     <div className="flex gap-1 bg-mist p-1 rounded-md">
                       <button 
                         onClick={() => onUpdateStatus(app.id, PaymentStatus.PAID)}
