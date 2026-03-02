@@ -21,7 +21,7 @@ Resultado da verificação conforme o [plano](.cursor/plans/verificar_notificaç
 
 **Cliente PWA:** O app em `https://nail-care-mu.vercel.app` carrega corretamente (Início, Agenda, Clientes, etc.). A inscrição push só funcionará após o redeploy que expor as rotas `/api/*` e com `VITE_VAPID_PUBLIC_KEY` no build; aí o browser pedirá permissão e o POST `/api/subscribe` aparecerá no DevTools.
 
-**Conclusão:** É necessário um **redeploy** do projeto na Vercel com a pasta `api/` (e `vercel.json` com rewrites e crons) para que `POST /api/subscribe` e `GET /api/notify-cron` sejam atendidos pelas serverless functions. Depois do redeploy, rode novamente os scripts abaixo.
+**Conclusão:** É necessário um **redeploy** do projeto na Vercel com a pasta `api/` (e `vercel.json` com rewrites e crons) para que `POST /api/subscribe` e `GET /api/notify-cron` sejam atendidos pelas serverless functions. Foi feito um push em `main` para acionar o deploy automático; aguarde 2–3 minutos e rode `.\scripts\verify-notifications.ps1` de novo. Se ainda falhar, confira no Vercel Dashboard se o deploy mais recente inclui a pasta `api/` e se as variáveis de ambiente estão definidas.
 
 ---
 
@@ -55,8 +55,8 @@ Para enviar uma notificação de teste ao dispositivo (inscrição já salva no 
 2. Defina as variáveis e execute:
 
 ```bash
-set VAPID_PUBLIC_KEY=BHzqNX5gwEWxCIC8n_BZbw5IQt3DGpBzr0PHRO4Bw4ATt1vnMslZrzqvoB6pweuXc6ZVP5RLO5UBKNFcDUtdJTM
-set VAPID_PRIVATE_KEY=E__psGswfYwrtLJfXEaYyos0p4jVG8-1MDRyPeSI3-w
+set VAPID_PUBLIC_KEY=<sua-vapid-public-key>
+set VAPID_PRIVATE_KEY=<sua-vapid-private-key>
 set SUBSCRIPTION_JSON={"endpoint":"...","keys":{"p256dh":"...","auth":"..."}}
 node scripts/send-test-push.mjs
 ```
