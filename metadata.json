@@ -1,0 +1,5 @@
+{
+  "name": "NailCare Manager",
+  "description": "Sistema de gestão para manicures e pedicures: controle de clientes, serviços, agenda e lucros.",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,25 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&family=Plus+Jakarta+Sans:wght@200..800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-serif: "Cormorant Garamond", serif;
+  --font-sans: "Plus Jakarta Sans", sans-serif;
+  
+  --color-brand-bg: #F9F8FC;
+  --color-brand-primary: #9D8BB5;
+  --color-brand-secondary: #B8A9C9;
+  --color-brand-accent: #7D6B91;
+  --color-brand-surface: #FFFFFF;
+}
+
+body {
+  @apply bg-brand-bg text-stone-700 font-sans antialiased;
+}
+
+h1, h2, h3, h4 {
+  @apply font-serif tracking-tight;
+}
+
+.glass-card {
+  @apply bg-white/80 backdrop-blur-sm border border-white shadow-sm rounded-3xl;
+}
