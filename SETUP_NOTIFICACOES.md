@@ -1,6 +1,8 @@
 # Configuração das notificações push (NailCare)
 
-Siga estes passos uma vez para ativar lembretes 1 dia e 1h antes dos atendimentos.
+**Estado atual:** notificações e cron estão **desativados** (limite de cron job na Vercel). O código e as rotas `/api/subscribe` e `/api/notify-cron` permanecem; ao reativar, siga os passos abaixo e adicione de volta o bloco `crons` em `vercel.json` e defina `VITE_PUSH_ENABLED=true` no build.
+
+Siga estes passos **quando for reativar** os lembretes (1 dia e 1h antes dos atendimentos).
 
 ---
 
@@ -78,14 +80,15 @@ No projeto [Vercel – nail-care](https://vercel.com/vinicius08oliveira85s-proje
 
 3. Salve e faça um **redeploy** do projeto para o build pegar `VITE_VAPID_PUBLIC_KEY`.
 
-**Desenvolvimento local:** para testar notificações no `npm run dev`, adicione no `.env.local`:
-`VITE_VAPID_PUBLIC_KEY=<sua-vapid-public-key>`
+**Desenvolvimento local:** para testar notificações no `npm run dev`, adicione no `.env.local`: `VITE_VAPID_PUBLIC_KEY=<sua-vapid-public-key>` e `VITE_PUSH_ENABLED=true`.
+
+**Reativar o cron:** em `vercel.json` adicione de novo o bloco `"crons": [ { "path": "/api/notify-cron", "schedule": "*/15 * * * *" } ]` e na Vercel defina também `VITE_PUSH_ENABLED=true` para o build (para o cliente inscrever push).
 
 ---
 
 ## 4. Conferir
 
-- **Cron:** a cada 15 min a Vercel chama `GET /api/notify-cron` com `Authorization: Bearer <CRON_SECRET>`.
+- **Cron:** a cada 15 min a Vercel chama `GET /api/notify-cron` com `Authorization: Bearer <CRON_SECRET>` (após reativar o cron em `vercel.json`).
 - **Push:** ao abrir o PWA, o app pede permissão de notificação e envia a inscrição para `POST /api/subscribe`.
 - **Lembretes:** agendamentos com data “amanhã” (Brasília) ou “em ~1h” disparam notificação e atualizam `notified_1day_at` / `notified_1h_at`.
 

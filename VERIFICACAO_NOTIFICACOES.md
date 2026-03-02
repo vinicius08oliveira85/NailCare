@@ -1,6 +1,19 @@
 # Verificação das notificações push
 
-Resultado da verificação conforme o [plano](.cursor/plans/verificar_notificações_push_59fb14cd.plan.md) e como reexecutar os testes.
+**Estado atual:** o cron de notificações foi **removido** de `vercel.json` (limite de cron na Vercel). As rotas `/api/subscribe` e `/api/notify-cron` continuam deployadas; a inscrição no cliente só roda se `VITE_PUSH_ENABLED=true`. Para reativar depois: adicione o bloco `crons` em `vercel.json`, defina as envs e `VITE_PUSH_ENABLED=true`, e use este doc para reexecutar os testes.
+
+---
+
+## Fazer o deploy das APIs (1 passo no dashboard)
+
+A produção na Vercel ainda está em um commit antigo (sem a pasta `api/`). Para as rotas `/api/subscribe` e `/api/notify-cron` passarem a funcionar:
+
+1. Abra o **Vercel Dashboard** → seu projeto **nail-care** → aba **Deployments**.
+2. No deploy mais recente que tiver o commit **"chore(build): remover deps"** ou **"chore(security)"** (ou qualquer commit depois de **"feat(NailCare): notificações push"**), clique nos **três pontinhos (⋯)** → **Redeploy**.
+3. Se não aparecer nenhum deploy desses commits, clique em **Create** → **Deploy** e escolha o branch `main` (isso faz um novo build a partir do GitHub).
+4. Aguarde o deploy ficar **Ready** (1–2 min), depois rode na pasta do projeto:  
+   `.\scripts\verify-notifications.ps1`  
+   O esperado é: **OK 400** e **OK 401**.
 
 ---
 
@@ -11,7 +24,7 @@ Resultado da verificação conforme o [plano](.cursor/plans/verificar_notificaç
 
 | # | Verificação | Resultado |
 |---|-------------|-----------|
-| 1 | Migration 003 no Supabase | Não verificada (timeout no MCP). Confira no Dashboard: tabela `push_subscriptions` e colunas `notified_1day_at` / `notified_1h_at` em `appointments`. |
+| 1 | Migration 003 no Supabase | **OK** – tabela `push_subscriptions` e colunas `notified_1day_at` / `notified_1h_at` em `appointments` confirmadas. |
 | 2 | Env vars na Vercel | Não verificada (dashboard). Confira em Settings → Environment Variables. |
 | 3 | POST /api/subscribe (body inválido) | **405** – na URL atual a rota `/api/subscribe` está retornando Método Não Permitido; o deploy em produção pode estar servindo o SPA para `/api/*`. |
 | 4 | GET /api/notify-cron sem auth | **200** (HTML) – esperado **401**. Resposta é o `index.html` do SPA, ou seja, as rotas `/api/*` não estão sendo atendidas pelas serverless functions. |
@@ -21,7 +34,7 @@ Resultado da verificação conforme o [plano](.cursor/plans/verificar_notificaç
 
 **Cliente PWA:** O app em `https://nail-care-mu.vercel.app` carrega corretamente (Início, Agenda, Clientes, etc.). A inscrição push só funcionará após o redeploy que expor as rotas `/api/*` e com `VITE_VAPID_PUBLIC_KEY` no build; aí o browser pedirá permissão e o POST `/api/subscribe` aparecerá no DevTools.
 
-**Conclusão:** É necessário um **redeploy** do projeto na Vercel com a pasta `api/` (e `vercel.json` com rewrites e crons) para que `POST /api/subscribe` e `GET /api/notify-cron` sejam atendidos pelas serverless functions. Foi feito um push em `main` para acionar o deploy automático; aguarde 2–3 minutos e rode `.\scripts\verify-notifications.ps1` de novo. Se ainda falhar, confira no Vercel Dashboard se o deploy mais recente inclui a pasta `api/` e se as variáveis de ambiente estão definidas.
+**Conclusão:** É necessário um **redeploy** manual no dashboard da Vercel (veja a seção **"Fazer o deploy das APIs"** acima) para que as rotas `/api/*` passem a ser atendidas pelas serverless functions. Depois do deploy, rode `.\scripts\verify-notifications.ps1` e confira as variáveis de ambiente em Settings → Environment Variables.
 
 ---
 

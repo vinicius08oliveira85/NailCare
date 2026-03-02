@@ -156,8 +156,9 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  // Push: pedir permissão e inscrever para lembretes (1 dia e 1h antes), uma vez no mount
+  // Push: pedir permissão e inscrever para lembretes (1 dia e 1h antes). Desativado por padrão (limite de cron na Vercel); ative com VITE_PUSH_ENABLED=true.
   useEffect(() => {
+    if (import.meta.env.VITE_PUSH_ENABLED !== 'true') return;
     if (typeof window === 'undefined' || !('Notification' in window) || !('serviceWorker' in navigator)) return;
     const vapidPublic = import.meta.env.VITE_VAPID_PUBLIC_KEY as string | undefined;
     if (!vapidPublic) return;
