@@ -275,8 +275,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ appointments, services
             </div>
             <h3 className="text-lg font-semibold text-plum">Evolução do Lucro</h3>
           </div>
-          <div className="h-[300px] min-h-[300px] w-full min-w-0">
-            <ResponsiveContainer width="100%" height="100%">
+          <div className="w-full min-w-0 h-[300px] min-h-[300px]" style={{ minWidth: 0, minHeight: 300 }}>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={300}>
               <LineChart data={timeData}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
                 <XAxis 
@@ -321,8 +321,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ appointments, services
             </div>
             <h3 className="text-lg font-semibold text-plum">Lucro por Serviço</h3>
           </div>
-          <div className="h-[300px] min-h-[300px] w-full min-w-0">
-            <ResponsiveContainer width="100%" height="100%">
+          <div className="w-full min-w-0 h-[300px] min-h-[300px]" style={{ minWidth: 0, minHeight: 300 }}>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={300}>
               <BarChart data={serviceData} layout="vertical" margin={{ left: 40 }}>
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f0f0f0" />
                 <XAxis type="number" hide />
