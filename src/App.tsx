@@ -82,6 +82,56 @@ function mapAppointment(row: { id: string; client_id: string | null; client_name
   };
 }
 
+function toWhatsAppPhone(phone: string): string {
+  const digits = (phone || '').replace(/\D/g, '');
+  if (digits.length === 0) return '';
+  return digits.startsWith('55') ? digits : `55${digits}`;
+}
+
+function whatsAppMessage(clientName: string, lastServiceDays: number | null): string {
+  const name = clientName || 'Cliente';
+  if (lastServiceDays === null) {
+    return `Olá, ${name}! Tudo bem? Sou a Juliana. 🌸
+
+Passando para te convidar a conhecer nosso espaço e dar aquele up no visual das suas unhas. Temos cores incríveis e técnicas modernas te esperando!
+
+Gostaria de consultar nossos horários disponíveis para esta semana? Será um prazer te atender!`;
+  }
+  const n = lastServiceDays;
+  return `Oi, ${name}! Tudo bem? Notamos que sua última visita foi há ${n} dias.
+
+Passamos para lembrar que este é o período ideal para realizar a manutenção e garantir que suas unhas continuem impecáveis e saudáveis. 💅 Vamos agendar sua revisão para esta semana? Estamos com alguns horários disponíveis e adoraríamos ver você por aqui!`;
+}
+
+function WhatsAppIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" />
+    </svg>
+  );
+}
+
+type TabId = 'dashboard' | 'agenda' | 'clients' | 'services' | 'reports';
+const HASH_TO_TAB: Record<string, TabId> = {
+  '': 'dashboard',
+  '#inicio': 'dashboard',
+  '#agenda': 'agenda',
+  '#clientes': 'clients',
+  '#servicos': 'services',
+  '#relatorios': 'reports',
+};
+const TAB_TO_HASH: Record<TabId, string> = {
+  dashboard: '#inicio',
+  agenda: '#agenda',
+  clients: '#clientes',
+  services: '#servicos',
+  reports: '#relatorios',
+};
+function getTabFromHash(): TabId {
+  const hash = typeof window !== 'undefined' ? window.location.hash : '';
+  return HASH_TO_TAB[hash] ?? 'dashboard';
+}
+
 export default function App() {
   // State (inicial vazio; carregado do Supabase no useEffect)
   const [clients, setClients] = useState<Client[]>([]);
@@ -89,7 +139,21 @@ export default function App() {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'agenda' | 'clients' | 'services' | 'reports'>('dashboard');
+  const [activeTab, setActiveTabState] = useState<TabId>(getTabFromHash);
+  const setActiveTab = (tab: TabId) => {
+    setActiveTabState(tab);
+    const hash = TAB_TO_HASH[tab];
+    if (typeof window !== 'undefined' && window.location.hash !== hash) {
+      window.history.replaceState(null, '', hash || window.location.pathname || '/');
+    }
+  };
+
+  // Manter aba sincronizada com o hash ao usar voltar/avançar do navegador
+  useEffect(() => {
+    const onHashChange = () => setActiveTabState(getTabFromHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalType, setModalType] = useState<'appointment' | 'client' | 'service'>('appointment');
   const [modalStatus, setModalStatus] = useState<PaymentStatus>(PaymentStatus.PENDING);
@@ -687,6 +751,10 @@ export default function App() {
                         : lastServiceDays < 30
                           ? 'bg-amber-50 text-amber-700 border-amber-200'
                           : 'bg-rose-50 text-rose-600 border-rose-200';
+                  const waPhone = toWhatsAppPhone(client.phone);
+                  const waUrl = waPhone
+                    ? `https://wa.me/${waPhone}?text=${encodeURIComponent(whatsAppMessage(client.name, lastServiceDays))}`
+                    : null;
                   return (
                   <div key={client.id} className="glass-card p-8 flex flex-col gap-5 group hover:shadow-[var(--shadow-raised)] hover:-translate-y-0.5 transition-all duration-200">
                     <div className="min-w-0">
@@ -701,24 +769,42 @@ export default function App() {
                         {lastServiceLabel}
                       </div>
                     </div>
-                    <div className="flex gap-2 justify-end border-t border-iris-light/20 pt-4">
+                    <div className="flex flex-nowrap gap-2 justify-end border-t border-iris-light/20 pt-4 min-w-0">
+                      {waUrl ? (
+                        <a
+                          href={waUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-2 sm:p-2.5 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-emerald-500 hover:border-emerald-200 active:scale-[0.97] transition-all duration-150 shadow-sm inline-flex items-center justify-center shrink-0"
+                          title="Enviar mensagem no WhatsApp"
+                        >
+                          <WhatsAppIcon size={18} />
+                        </a>
+                      ) : (
+                        <span
+                          className="p-2 sm:p-2.5 bg-white border border-iris-light/40 rounded-md text-fog cursor-not-allowed inline-flex items-center justify-center shrink-0"
+                          title="Sem número para WhatsApp"
+                        >
+                          <WhatsAppIcon size={18} />
+                        </span>
+                      )}
                       <button 
                         onClick={() => setHistoryClientId(client.id)}
-                        className="p-3 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-emerald-500 hover:border-emerald-200 active:scale-[0.97] transition-all duration-150 shadow-sm"
+                        className="p-2 sm:p-2.5 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-emerald-500 hover:border-emerald-200 active:scale-[0.97] transition-all duration-150 shadow-sm shrink-0"
                         title="Ver Histórico"
                       >
                         <Clock size={18} />
                       </button>
                       <button 
                         onClick={() => handleOpenModal('client', client)}
-                        className="p-3 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-brand-primary hover:bg-iris-light/20 active:scale-[0.97] transition-all duration-150 shadow-sm"
+                        className="p-2 sm:p-2.5 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-brand-primary hover:bg-iris-light/20 active:scale-[0.97] transition-all duration-150 shadow-sm shrink-0"
                         title="Editar"
                       >
                         <Edit2 size={18} />
                       </button>
                       <button 
                         onClick={() => deleteItem('client', client.id)}
-                        className="p-3 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-rose-500 hover:border-rose-200 active:scale-[0.97] transition-all duration-150 shadow-sm"
+                        className="p-2 sm:p-2.5 bg-white border border-iris-light/40 rounded-md text-dusk hover:text-rose-500 hover:border-rose-200 active:scale-[0.97] transition-all duration-150 shadow-sm shrink-0"
                         title="Excluir"
                       >
                         <Trash2 size={18} />
