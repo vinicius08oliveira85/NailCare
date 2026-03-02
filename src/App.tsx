@@ -737,13 +737,22 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {clients.map(client => {
-                  const lastAppointment = appointments
-                    .filter(a => a.clientId === client.id && new Date(a.date) <= new Date())
-                    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
-                  const lastServiceDays = lastAppointment
-                    ? Math.floor((Date.now() - new Date(lastAppointment.date).getTime()) / 86400000)
-                    : null;
+                {[...clients]
+                  .map(client => {
+                    const lastAppointment = appointments
+                      .filter(a => a.clientId === client.id && new Date(a.date) <= new Date())
+                      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+                    const lastServiceDays = lastAppointment
+                      ? Math.floor((Date.now() - new Date(lastAppointment.date).getTime()) / 86400000)
+                      : null;
+                    return { client, lastServiceDays };
+                  })
+                  .sort((a, b) => {
+                    const daysA = a.lastServiceDays ?? -1;
+                    const daysB = b.lastServiceDays ?? -1;
+                    return daysB - daysA;
+                  })
+                  .map(({ client, lastServiceDays }) => {
                   const lastServiceLabel = lastServiceDays === null
                     ? 'Sem Serviço'
                     : lastServiceDays === 0
@@ -820,7 +829,7 @@ export default function App() {
                     </div>
                   </div>
                   );
-                })}
+                  })}
                 {clients.length === 0 && (
                   <div className="col-span-full p-32 text-center border-2 border-dashed border-iris-light/40 rounded-3xl">
                     <div className="w-20 h-20 bg-mist rounded-full flex items-center justify-center mx-auto mb-6 text-fog">
